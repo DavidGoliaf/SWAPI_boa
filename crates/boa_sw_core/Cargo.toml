@@ -1,0 +1,36 @@
+[package]
+name = "boa_sw_core"
+description = "Engine-independent core model and algorithms for the Service Workers implementation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+url = { workspace = true }
+http = { workspace = true }
+indexmap = { workspace = true }
+smallvec = { workspace = true }
+hashbrown = { workspace = true }
+bitflags = { workspace = true }
+sha2 = { workspace = true }
+tracing = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+rstest = { workspace = true }
+insta = { workspace = true }
+
+[features]
+default = ["std"]
+std = []
+tracing = ["dep:tracing"]
+serde = ["dep:serde", "indexmap/serde", "url/serde"]
+test-util = []
+
+[lints]
+workspace = true

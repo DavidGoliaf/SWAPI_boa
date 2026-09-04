@@ -1,0 +1,21 @@
+[package]
+name = "boa_sw_wpt"
+description = "web-platform-tests harness for boa_sw (development tool, not published)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+boa_sw = { workspace = true }
+boa_sw_core = { workspace = true }
+boa_engine = { workspace = true }
+
+[features]
+default = []
+
+[lints]
+workspace = true

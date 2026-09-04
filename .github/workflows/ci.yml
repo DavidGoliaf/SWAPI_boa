@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        features:
+          - "--all-features"
+          - ""                                   # default features (includes sqlite, per D-1)
+          - "--no-default-features"
+          - "--no-default-features --features memory-backend"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace ${{ matrix.features }}
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p boa_sw_core --target wasm32-unknown-unknown
+      - run: cargo build -p boa_sw_core --target wasm32-unknown-unknown --no-default-features
+
+  dependency-direction:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - name: boa_sw_core must not depend on the engine (R2.2.2)
+        run: |
+          set -euo pipefail
+          if cargo tree -p boa_sw_core --all-features --edges normal,build,dev \
+             | grep -E '(^|[^a-z_])boa_(engine|gc|runtime|wintertc|macros)' ; then
+            echo "::error::boa_sw_core depends on the engine — violates R2.2.2"
+            exit 1
+          fi
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  coverage:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "coverage gate not implemented yet (T-26 wires it; thresholds in TS R15.2.1)"
+
+  wpt:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "WPT gate not implemented yet (T-24 wires it; contract in TS R15.3.3)"

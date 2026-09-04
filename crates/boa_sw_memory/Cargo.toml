@@ -1,0 +1,25 @@
+[package]
+name = "boa_sw_memory"
+description = "In-memory storage backend for boa_sw (registrations, script maps, cache storage)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+boa_sw_core = { workspace = true }
+indexmap = { workspace = true }
+hashbrown = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+boa_sw_core = { workspace = true, features = ["test-util"] }
+rstest = { workspace = true }
+
+[features]
+default = []
+
+[lints]
+workspace = true

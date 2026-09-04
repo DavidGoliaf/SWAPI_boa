@@ -1,0 +1,29 @@
+[package]
+name = "boa_sw_fetch"
+description = "Fetch API subset (Headers, Request, Response, fetch) required by Service Workers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+boa_sw_core = { workspace = true }
+boa_engine = { workspace = true }
+boa_gc = { workspace = true }
+boa_runtime = { workspace = true, optional = true }
+http = { workspace = true }
+url = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+rstest = { workspace = true }
+proptest = { workspace = true }
+
+[features]
+default = []
+runtime-interop = ["dep:boa_runtime"]
+
+[lints]
+workspace = true

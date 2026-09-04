@@ -1,0 +1,72 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/boa_sw_core",
+    "crates/boa_sw_dom",
+    "crates/boa_sw_fetch",
+    "crates/boa_sw",
+    "crates/boa_sw_memory",
+    "crates/boa_sw_sqlite",
+    "crates/boa_sw_wpt",
+]
+# `examples/offline_shell` joins the workspace in T-23; `fuzz/` has its own workspace (T-25).
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91.0"
+license = "MIT OR Apache-2.0"
+authors = ["BoaX Developers"]
+repository = "https://github.com/boa-dev/boa"
+
+[workspace.dependencies]
+# --- internal ---
+boa_sw_core = { version = "0.1.0", path = "crates/boa_sw_core" }
+# Note: do NOT add `default-features = false` here — dependents inherit it and would silently
+# lose the `std` feature of the core crate.
+boa_sw_dom = { version = "0.1.0", path = "crates/boa_sw_dom" }
+boa_sw_fetch = { version = "0.1.0", path = "crates/boa_sw_fetch" }
+boa_sw = { version = "0.1.0", path = "crates/boa_sw" }
+boa_sw_memory = { version = "0.1.0", path = "crates/boa_sw_memory" }
+boa_sw_sqlite = { version = "0.1.0", path = "crates/boa_sw_sqlite" }
+
+# --- engine (TS §2.3) ---
+boa_engine = "~0.22.0"
+boa_gc = "~0.22.0"
+boa_macros = "~0.22.0"
+boa_runtime = "~0.22.0"
+boa_wintertc = "~0.22.0"
+
+# --- shared ---
+thiserror = "2.0"
+url = "2.5"
+http = "1"
+indexmap = "2.7"
+smallvec = { version = "1.13", features = ["union", "const_generics"] }
+hashbrown = "0.15"
+bitflags = "2"
+sha2 = "0.10"
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+futures-lite = "2"
+futures-channel = "0.3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# --- dev ---
+proptest = "1.6"
+rstest = "0.24"
+insta = "1"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+unwrap_used = "warn"
+expect_used = "warn"

@@ -1,0 +1,23 @@
+[package]
+name = "boa_sw_dom"
+description = "Minimal DOM shim (EventTarget, Event, DOMException, MessageEvent, AbortController) for Boa"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+boa_engine = { workspace = true }
+boa_gc = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+rstest = { workspace = true }
+
+[features]
+default = []
+
+[lints]
+workspace = true
