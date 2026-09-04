@@ -11,6 +11,12 @@ Two tables, both required by TS §15.2.2 and checked at release by `scripts/chec
 | `R2.2.1` | crate manifests | `ci: dependency-direction` | T-01 |
 | `R2.2.2` | `crates/boa_sw_core/Cargo.toml` | `ci: dependency-direction` | T-01 |
 | `R2.4.1` | crate features | `ci: feature matrix` | T-01 |
+| `R6.1.1` | `crates/boa_sw_core/src/ids.rs` | `ids::tests::allocate_starts_at_one`, `ids::tests::restore_from_continues_above_max`, `ids::tests::default_matches_new` | T-02 |
+| `R6.1.2` | `crates/boa_sw_core/src/ids.rs` | `ids::tests::display_format` | T-02 |
+| `R13.1` | `crates/boa_sw_core/src/key.rs` | `key::tests::trustworthy_table` | T-02 |
+| `R12.1` | `crates/boa_sw_core/src/error.rs` | `error::tests::js_kind_is_total`, `error::tests::default_message_table` | T-02 |
+| `R4.2.9` | `crates/boa_sw_core/src/observe.rs` | `observe::tests::null_observer_is_inert` | T-02 |
+| `R4.2.11` | `crates/boa_sw_core/src/observe.rs` | `observe::tests::null_observer_is_inert` | T-02 |
 
 *(every later task appends its rows)*
 
