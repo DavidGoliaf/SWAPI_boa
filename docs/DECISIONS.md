@@ -57,7 +57,7 @@ Registrations, script resource maps and caches are persisted through a single `S
 
 Default storage backend for docs, examples and CI is **SQLite.** `sqlite-backend` is in `default-features`; `boa_sw_memory` remains for tests and for hosts that opt out (`--no-default-features`). A host that selects the memory backend is warned once at `install` (TS §2.4, `R2.4.2`, T-22, T-23, §17.1).
 
-## D-2 — Is `caches` required in the client realm
+## D-2 — `caches` is exposed in the client realm by default
 
 **Yes, by default**, per the Spec's `WindowOrWorkerGlobalScope` mixin. `SwConfig::caches_in_client_realm = true`; turning it off is the host's documented deviation (TS `R5.3.1`, T-19).
 
