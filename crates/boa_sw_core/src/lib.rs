@@ -14,6 +14,7 @@ pub mod error;
 pub mod ids;
 pub mod key;
 pub mod observe;
+pub mod url_util;
 
 pub use clock::Clock;
 pub use error::{
