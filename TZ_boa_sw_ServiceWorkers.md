@@ -9,7 +9,7 @@
 | **TS version** | 1.0 |
 | **Date** | 2026-09-04 |
 | **Target platform** | Rust 1.91.0 (edition 2024), `boa_engine` 0.22.x |
-| **Normative specification** | [Service Workers, W3C Candidate Recommendation Draft](https://www.w3.org/TR/service-workers/) (hereafter **the Spec**) |
+| **Normative specification** | [Service Workers, W3C Candidate Recommendation Draft, 12 August 2026](https://www.w3.org/TR/2026/CRD-service-workers-20260812/) (hereafter **the Spec**); companion revisions pinned in `docs/SPEC_REVISION.md` |
 | **Sibling projects** | `boa-idb` (IndexedDB), `boa-webstorage` (Web Storage) — same architectural style, same working contract |
 | **Status** | for execution |
 | **Audience** | Rust engineers **and** LLM coding agents executing one work order at a time |
@@ -554,6 +554,7 @@ pub trait SwObserver: 'static {
 }
 ```
 `R4.2.9` — observer calls MUST NOT be able to affect behaviour; they are for logging, metrics and tests. When the `tracing` feature is on, the same information is emitted as `tracing` events.
+`R4.2.11` — `ObserverEvent` is `#[non_exhaustive]`: `T-02` defines the initial set, and later tasks (`T-05`, `T-07`, `T-13`, `T-18`, `T-23`) add variants as the behaviour they observe is implemented. Host code MUST therefore match with a wildcard arm; crate-internal code MUST NOT.
 
 #### 4.2.6. `HostTicket<T>`
 
@@ -1086,7 +1087,7 @@ Algorithm (host calls `SwRuntime::handle_fetch`):
 
 ### 8.2. `respondWith` resolution
 
-`R8.2.1` — the argument is resolved as a promise; a non-`Response` fulfilment value → `Failed(NetworkError::TypeError)` and the `FetchEvent`'s `handled` promise rejects with `TypeError`.
+`R8.2.1` — the argument is resolved as a promise; a non-`Response` fulfilment value → `Failed(NetworkError::InvalidResponse)` and the `FetchEvent`'s `handled` promise rejects with `TypeError`.
 `R8.2.2` — a rejected promise → `Failed(NetworkError::HandlerRejected)`.
 `R8.2.3` — a response whose body has already been used (`bodyUsed`) → `TypeError`.
 `R8.2.4` — response type rules: `opaque` is allowed only when the request mode is `no-cors`; `opaqueredirect` only when the request mode is `navigate` and redirect mode is `manual`; `cors`/`basic`/`default` always allowed; `error` → network error.
@@ -1253,16 +1254,45 @@ pub enum SwError {
 }
 ```
 
-Mapping (normative; `boa_sw` MUST implement `fn to_js(&self, ctx) -> JsValue` exactly per this table):
+The mapping is exposed to the bindings as data, not as prose:
+
+```rust
+/// How an `SwError` surfaces to JavaScript.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum JsErrorKind {
+    /// A native `TypeError`.
+    TypeError,
+    /// A native `RangeError`.
+    RangeError,
+    /// A `DOMException` with this name.
+    Dom(&'static str),
+    /// Never reaches JavaScript; returned to the host as a `Result`.
+    HostOnly,
+}
+
+impl SwError {
+    /// Total, exhaustive mapping — see the table below. Adding a variant without extending
+    /// this match is a compile error.
+    pub fn js_kind(&self) -> JsErrorKind;
+    /// `Some(name)` when `js_kind()` is `Dom(name)`, `None` otherwise.
+    pub fn dom_name(&self) -> Option<&'static str>;
+    /// The message used when the error carries none of its own.
+    pub fn default_message(&self) -> String;
+}
+```
+
+Mapping (normative; `boa_sw` MUST implement `fn to_js(&self, ctx) -> JsValue` from `js_kind()` alone, exactly per this table):
 
 | `SwError` | JS exception | Typical message |
 |---|---|---|
-| `InvalidUrl`, `DataClone`* | `TypeError` (*`DataCloneError` for clone failures) | `"Failed to parse URL"` |
+| `InvalidUrl` | `TypeError` | `"Failed to parse URL"` |
+| `DataClone` | `DataCloneError` | `"The value could not be cloned"` |
 | `CrossOrigin` | `SecurityError` | `"The origin of the provided scriptURL does not match the current origin"` |
 | `InsecureContext` | `SecurityError` | `"Service workers are only available in secure contexts"` |
 | `PathRestriction` | `SecurityError` | `"The path of the provided scope is not under the max scope allowed"` |
 | `BadScriptMime` | `SecurityError` | `"The script has an unsupported MIME type"` |
-| `ScriptFetch`, `ScriptRedirect`, `Network` | `TypeError` | `"Failed to fetch a service worker script"` |
+| `ScriptFetch`, `Network` | `TypeError` | `"Failed to fetch a service worker script"` |
+| `ScriptRedirect` | `SecurityError` | `"The script resource is behind a redirect, which is disallowed"` (consistent with `R6.4.2`; if the pinned Spec revision says the redirect is turned into a plain network error, raise it in `docs/QUESTIONS.md` before changing this row) |
 | `ScriptEval`, `InstallFailed` | `TypeError` (the underlying JS error value is used when available) | — |
 | `InvalidState` | `InvalidStateError` | — |
 | `Aborted`, `TimedOut` | `AbortError` | — |
@@ -1459,10 +1489,10 @@ Estimated effort (senior Rust engineer, or an agent under review): M0 ≈ 1.5 we
 | Diff budget | ~600 lines |
 
 **Implement**
-1. `error.rs`: `SwError` exactly as in §12, plus `StorageError`, `NetworkError`, `ScriptFetchError`, `ScriptEvalError`, and `From` conversions into `SwError`. Add `impl SwError { pub fn dom_name(&self) -> Option<&'static str>; pub fn default_message(&self) -> String; }` returning the values from the §12 table.
+1. `error.rs`: `SwError` exactly as in §12, plus `StorageError`, `NetworkError`, `ScriptFetchError`, `ScriptEvalError`, and `From` conversions into `SwError`. Add `JsErrorKind` and `impl SwError { pub fn js_kind(&self) -> JsErrorKind; pub fn dom_name(&self) -> Option<&'static str>; pub fn default_message(&self) -> String; }` returning the values from the §12 table.
 2. `ids.rs`: the id newtypes of §6.1 with `Display`, an `IdAllocator { next: u64 }` supporting `restore_from(max: u64)`.
 3. `key.rs`: `StorageKey` with `from_origin(&Url)`, `as_str`, `is_potentially_trustworthy(&Url) -> bool` (`R13.1`).
-4. `clock.rs`: the `Clock` trait (§4.2.1) plus `FakeClock` (behind `cfg(feature = "test-util")`) with `advance_ms`.
+4. `clock.rs`: the `Clock` trait (§4.2.1), `SystemClock` (behind feature `std`) and `FakeClock` (behind feature `test-util`) with `advance_ms`.
 5. `observe.rs`: `ObserverEvent` enum (job started/finished, worker state changed, event dispatched/handled, fetch decision, storage batch applied, worker terminated) and the `SwObserver` trait.
 
 **Tests**
