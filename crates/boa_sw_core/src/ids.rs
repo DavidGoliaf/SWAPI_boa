@@ -12,6 +12,8 @@ macro_rules! define_id {
     ($name:ident, $prefix:expr) => {
         /// An opaque identifier.
         #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+        #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+        #[cfg_attr(feature = "serde", serde(transparent))]
         pub struct $name(u64);
 
         impl $name {
@@ -46,6 +48,8 @@ define_id!(CacheId, "cache");
 ///
 /// Opaque: this crate never parses it, never generates one, and never reuses one.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
 pub struct ClientId(String);
 
 impl ClientId {

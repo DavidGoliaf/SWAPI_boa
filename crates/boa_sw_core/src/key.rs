@@ -6,6 +6,8 @@ use crate::error::{SwError, SwResult};
 
 /// Storage isolation key (TS §6.1). Normally the serialized origin of the client.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
 pub struct StorageKey(String);
 
 impl StorageKey {
