@@ -74,17 +74,23 @@ fn strip_fragment(s: &str) -> &str {
     }
 }
 
-/// **Scope match** (TS `R6.2.2`, `#scope-match-algorithm`): true iff the serialized `scope` is a
-/// string prefix of the serialized `client_url` with its fragment excluded.
+/// **Scope match** (TS `R6.2.2`, `#scope-match-algorithm`): true iff the serialized `scope`
+/// (fragment excluded) is a string prefix of the serialized `client_url` (fragment excluded).
 ///
 /// `/foo` matching `/foobar` is intentional (a known Spec property, not a bug) — the comparison
 /// is over serialized strings, not path segments.
 ///
+/// The fragment is excluded from *both* sides (work order `T-03` §3.1). This agrees with the TS
+/// on every valid input: stored scopes never carry a fragment (`R6.1.3`), so stripping the
+/// scope's fragment is a no-op in practice; it only makes direct calls with an
+/// un-normalized scope behave the same. See `Q-02` in `docs/QUESTIONS.md`.
+///
 /// MUST NOT allocate: compares the URLs' own string representations directly.
 #[must_use]
 pub fn scope_matches(scope: &Url, client_url: &Url) -> bool {
+    let scope_str = strip_fragment(scope.as_str());
     let client_str = strip_fragment(client_url.as_str());
-    client_str.starts_with(scope.as_str())
+    client_str.starts_with(scope_str)
 }
 
 /// **Path restriction** (TS `R6.2.3`, `#path-restriction`): the scope's path MUST be prefixed by
@@ -198,6 +204,8 @@ mod tests {
         assert!(has_encoded_slash(&url("https://example.com/%2f")));
         // In the query or fragment only -> false.
         assert!(!has_encoded_slash(&url("https://example.com/a?x=%2f#y%5c")));
+        // Fragment-only encoded slash (clean query) -> false.
+        assert!(!has_encoded_slash(&url("https://example.com/a#frag%2f")));
         // Plain path, no encoded slash -> false.
         assert!(!has_encoded_slash(&url("https://example.com/a/b")));
         assert!(!has_encoded_slash(&url("https://example.com/")));
@@ -234,13 +242,25 @@ mod tests {
                 true,
             ),
             ("https://example.com/foo/", "https://example.com/foo", false),
-            // Fragment excluded from the client URL only.
+            // Fragment excluded from the serialized comparison (both sides).
             (
                 "https://example.com/foo?x=1",
                 "https://example.com/foo?x=1#y",
                 true,
             ),
             ("https://example.com/foo", "https://example.com/foo#b", true),
+            // Scope carrying a fragment (never stored that way per R6.1.3, see Q-02):
+            // the fragment is excluded from both sides before comparing.
+            (
+                "https://example.com/foo#frag",
+                "https://example.com/foobar",
+                true,
+            ),
+            (
+                "https://example.com/foo#frag",
+                "https://example.com/foo",
+                true,
+            ),
             // Different origin, identical path.
             ("https://a.example/foo", "https://b.example/foo", false),
             // Scope longer than the client URL.

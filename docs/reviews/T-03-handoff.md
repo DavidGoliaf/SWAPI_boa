@@ -27,7 +27,7 @@ to avoid `vboxsf` shared-folder I/O slowness (same workaround as `T-01`/`T-02`).
 | 1 | Builds, all feature combinations | `cargo build -p boa_sw_core --all-features`, `--no-default-features`, `--features test-util` | ✅ all `Finished` |
 | 2 | Tests pass | `cargo test -p boa_sw_core --all-features` | ✅ 32 unit + 1 integration test passing |
 | 3 | wasm build unaffected | `cargo build -p boa_sw_core --target wasm32-unknown-unknown --no-default-features` | ✅ |
-| 4 | ≥ 30 combined table cases | `scope_matches_table` (15 cases) + `path_restriction_ok_table` (15 `assert!`s) | ✅ 30 total |
+| 4 | ≥ 30 combined table cases | `scope_matches_table` (17 cases) + `path_restriction_ok_table` (15 `assert!`s) | ✅ 32 total |
 | 5 | No hot-path allocation in `scope_matches` | code inspection (quoted below) | ✅ |
 | 6 | Core is still engine-free | `cargo tree -p boa_sw_core --all-features --edges normal,build,dev \| grep -E 'boa_(engine\|gc\|runtime\|wintertc\|macros)'` | no output |
 | 7 | Lints | `cargo clippy -p boa_sw_core --all-targets --all-features -- -D warnings` | ✅ clean |
@@ -41,8 +41,9 @@ to avoid `vboxsf` shared-folder I/O slowness (same workaround as `T-01`/`T-02`).
 
 ```rust
 pub fn scope_matches(scope: &Url, client_url: &Url) -> bool {
+    let scope_str = strip_fragment(scope.as_str());
     let client_str = strip_fragment(client_url.as_str());
-    client_str.starts_with(scope.as_str())
+    client_str.starts_with(scope_str)
 }
 
 fn strip_fragment(s: &str) -> &str {
@@ -67,10 +68,10 @@ programmatically — the same limitation `T-02` would have hit for a similar cla
   fragment).
 - `default_scope` — `default_scope_removes_last_segment` (3 cases) and the property test
   `scope_matches_agrees_with_default_scope`.
-- `has_encoded_slash` — `has_encoded_slash_table` (8 cases: both encodings, both cases, path vs.
-  query/fragment, plain path).
+- `has_encoded_slash` — `has_encoded_slash_table` (10 cases: both encodings, both cases,
+  path vs. query/fragment, fragment-only encoded slash, plain path).
 - `same_origin` — `same_origin_table` (4 cases).
-- `scope_matches` (and `strip_fragment`) — `scope_matches_table` (15 cases) and
+- `scope_matches` (and `strip_fragment`) — `scope_matches_table` (17 cases, incl. two scope-with-`#frag` cases) and
   `scope_matches_agrees_with_default_scope`.
 - `path_restriction_ok` — `path_restriction_ok_table` (15 cases, both branches and the
   malformed-`allowed` fallthrough).
@@ -78,9 +79,19 @@ programmatically — the same limitation `T-02` would have hit for a similar cla
 
 ## Deviations
 
-None from the work order's signatures or behaviour. One interpretive note, not a deviation from
-anything explicit in the work order (recorded here since it affects `path_restriction_ok`'s
-observable behaviour on malformed input, which the work order left implicit):
+One genuine work-order-vs-TS discrepancy, found in review and fixed on this branch (escalated as
+`docs/QUESTIONS.md / Q-02`, answer pending):
+
+- **`scope_matches` fragment handling.** Work order §3.1 excludes the fragment from *both* sides;
+  TS `R6.2.2` excludes it from the client URL only. The implementation now follows the work order
+  (strips both). On valid inputs the two readings agree — stored scopes never carry a fragment
+  (`R6.1.3`) — so `T-04`'s `match_registration` is unaffected either way; the difference is only
+  observable for direct calls with an un-normalized scope, pinned by two new
+  `scope_matches_table` cases (`scope` with `#frag`).
+
+One interpretive note, not a deviation from anything explicit in the work order (recorded here
+since it affects `path_restriction_ok`'s observable behaviour on malformed input, which the work
+order left implicit; escalated as `docs/QUESTIONS.md / Q-03`):
 
 - **Malformed `Service-Worker-Allowed` value.** `R6.2.3` does not say what happens when the header
   value fails to parse against the script URL. `path_restriction_ok` treats a malformed `allowed`

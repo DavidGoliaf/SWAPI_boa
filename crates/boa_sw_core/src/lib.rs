@@ -3,7 +3,8 @@
 //! Part of the `boa-sw` workspace. The normative specification is
 //! `TZ_boa_sw_ServiceWorkers.md`; the working contract for implementers is `AGENTS.md`.
 //!
-//! **Status:** foundations (`T-02`): errors, ids, storage key, clock, observer.
+//! **Status:** URL layer (`T-03`): parsing, scope matching, path restriction on top of the
+//! `T-02` foundations (errors, ids, storage key, clock, observer).
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
