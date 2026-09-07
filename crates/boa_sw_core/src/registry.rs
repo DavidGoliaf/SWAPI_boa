@@ -21,11 +21,11 @@ use crate::url_util::{scope_matches, serialize_exclude_fragment};
 #[derive(Clone, Debug, Default)]
 pub struct Registry {
     /// Lookup by `(storage key, normalized serialized scope)`, in insertion order.
-    pub(crate) by_scope: IndexMap<(StorageKey, String), RegistrationId>,
+    by_scope: IndexMap<(StorageKey, String), RegistrationId>,
     /// Registration records by id.
-    pub(crate) registrations: HashMap<RegistrationId, RegistrationRecord>,
+    registrations: HashMap<RegistrationId, RegistrationRecord>,
     /// Worker records by id.
-    pub(crate) workers: HashMap<WorkerId, WorkerRecord>,
+    workers: HashMap<WorkerId, WorkerRecord>,
 }
 
 impl Registry {
@@ -42,16 +42,65 @@ impl Registry {
         (key.clone(), serialize_exclude_fragment(scope))
     }
 
-    /// Inserts a registration. Strips a fragment from the stored scope before indexing (`R6.1.3`).
+    /// Validates the three worker slots of `registration` in order
+    /// (`installing`, `waiting`, `active`): no duplicate worker id, every named worker exists,
+    /// and every named worker's back-pointer agrees with `registration`.
+    ///
+    /// Read-only: never mutates the registry, allocates nothing proportional to it.
     ///
     /// # Errors
-    /// `Err` on a duplicate registration id, a duplicate `(storage key, scope)` index key, a
-    /// slot referencing an unknown worker, or a slot referencing a worker that belongs to a
-    /// different registration.
+    /// `Err` naming the offending slot/worker on the first violation found.
+    fn validate_slots(
+        &self,
+        registration: RegistrationId,
+        slots: [Option<WorkerId>; 3],
+    ) -> Result<(), String> {
+        const NAMES: [&str; 3] = ["installing", "waiting", "active"];
+        let mut seen: [Option<WorkerId>; 3] = [None, None, None];
+        for (index, slot) in slots.into_iter().enumerate() {
+            let Some(id) = slot else { continue };
+            if seen[..index].contains(&Some(id)) {
+                return Err(format!(
+                    "registration {registration} names worker {id} in more than one slot (duplicate in {})",
+                    NAMES[index]
+                ));
+            }
+            seen[index] = Some(id);
+            let Some(worker) = self.workers.get(&id) else {
+                return Err(format!(
+                    "registration {registration} slot {} references unknown worker {id}",
+                    NAMES[index]
+                ));
+            };
+            if worker.registration != registration {
+                return Err(format!(
+                    "registration {registration} slot {} references worker {id} belonging to registration {}",
+                    NAMES[index], worker.registration
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Snapshots the three slots of `record` in validation order.
+    fn slots_of(record: &RegistrationRecord) -> [Option<WorkerId>; 3] {
+        [record.installing, record.waiting, record.active]
+    }
+
+    /// Inserts a registration. Strips a fragment from the stored scope before indexing (`R6.1.3`).
+    ///
+    /// Validation (`validate_slots`: no duplicate slot worker, no unknown worker, no foreign
+    /// worker) runs before the first mutation: a rejection leaves every index and record
+    /// unchanged.
+    ///
+    /// # Errors
+    /// `Err` on a duplicate registration id, a duplicate `(storage key, scope)` index key, or
+    /// any slot violation.
     pub fn insert_registration(&mut self, mut record: RegistrationRecord) -> Result<(), String> {
         if self.registrations.contains_key(&record.id) {
             return Err(format!("duplicate registration id {}", record.id));
         }
+        self.validate_slots(record.id, Self::slots_of(&record))?;
         record.scope.set_fragment(None);
         let index_key = Self::scope_key(&record.storage_key, &record.scope);
         if self.by_scope.contains_key(&index_key) {
@@ -59,23 +108,6 @@ impl Registry {
                 "duplicate registration for scope {}",
                 record.scope.as_str()
             ));
-        }
-        // §6 rules 5/8: slots must reference existing workers that belong to this registration.
-        for slot in [record.installing, record.waiting, record.active]
-            .into_iter()
-            .flatten()
-        {
-            let Some(worker) = self.workers.get(&slot) else {
-                return Err(format!(
-                    "registration slot references unknown worker {slot}"
-                ));
-            };
-            if worker.registration != record.id {
-                return Err(format!(
-                    "registration {} slot references worker {slot} belonging to registration {}",
-                    record.id, worker.registration
-                ));
-            }
         }
         self.by_scope.insert(index_key, record.id);
         self.registrations.insert(record.id, record);
@@ -108,13 +140,12 @@ impl Registry {
     /// Replaces a registration record, preserving id and index identity.
     ///
     /// The replacement must keep the same `id`, `storage_key` and normalized `scope` (scope
-    /// changes belong to unregister + register, not to replacement). Slots must reference
-    /// existing workers that belong to this registration. The replacement is atomic: on `Err`
-    /// the stored record is unchanged.
+    /// changes belong to unregister + register, not to replacement). Slot validation (no
+    /// duplicate, no unknown, no foreign worker) runs before any mutation: a rejection leaves
+    /// the stored record unchanged.
     ///
     /// # Errors
-    /// `Err` when the id is unknown, the key/scope changed, a slot dangles, or a slot
-    /// references a worker belonging to a different registration.
+    /// `Err` when the id is unknown, the key/scope changed, or any slot check fails.
     pub fn replace_registration(&mut self, mut record: RegistrationRecord) -> Result<(), String> {
         let stored = self
             .registrations
@@ -130,22 +161,7 @@ impl Registry {
                 record.id
             ));
         }
-        for slot in [record.installing, record.waiting, record.active]
-            .into_iter()
-            .flatten()
-        {
-            let Some(worker) = self.workers.get(&slot) else {
-                return Err(format!(
-                    "registration slot references unknown worker {slot}"
-                ));
-            };
-            if worker.registration != record.id {
-                return Err(format!(
-                    "registration {} slot references worker {slot} belonging to registration {}",
-                    record.id, worker.registration
-                ));
-            }
-        }
+        self.validate_slots(record.id, Self::slots_of(&record))?;
         self.registrations.insert(record.id, record);
         Ok(())
     }
@@ -260,6 +276,44 @@ impl Registry {
         self.registrations.get(&id)
     }
 
+    /// Read-only views for the invariants checker (`invariants.rs`).
+    ///
+    /// These are the only cross-module paths into registry storage; all return shared
+    /// references or copies, never `&mut`, owned maps, or mutation handles.
+    pub(crate) fn registrations_for_invariants(&self) -> impl Iterator<Item = &RegistrationRecord> {
+        self.registrations.values()
+    }
+
+    pub(crate) fn workers_for_invariants(&self) -> impl Iterator<Item = &WorkerRecord> {
+        self.workers.values()
+    }
+
+    pub(crate) fn scope_index_for_invariants(
+        &self,
+    ) -> impl Iterator<Item = (&(StorageKey, String), &RegistrationId)> {
+        self.by_scope.iter()
+    }
+
+    /// Test-only: inserts records bypassing validation, to construct broken registries for the
+    /// invariants checker. Production code never uses this path.
+    #[cfg(test)]
+    pub(crate) fn inject_for_test(
+        &mut self,
+        registration: Option<RegistrationRecord>,
+        worker: Option<WorkerRecord>,
+        index: Option<((StorageKey, String), RegistrationId)>,
+    ) {
+        if let Some(record) = registration {
+            self.registrations.insert(record.id, record);
+        }
+        if let Some(record) = worker {
+            self.workers.insert(record.id, record);
+        }
+        if let Some((key, id)) = index {
+            self.by_scope.insert(key, id);
+        }
+    }
+
     /// Returns the worker record for `id`, if present.
     #[must_use]
     pub fn worker(&self, id: WorkerId) -> Option<&WorkerRecord> {
@@ -366,6 +420,30 @@ mod tests {
         Url::parse(s).unwrap()
     }
 
+    /// One shared fixture: R1 (`/`) + R2 (`/foo`) + R3 (`/foo/bar/`) under one key, plus R4
+    /// under another key. Covers key isolation, longest-prefix and insertion-order inputs.
+    /// (`populated` is used by lookup/order tests; uninstalling-skip builds its own state.)
+    fn populated() -> Registry {
+        let mut registry = Registry::new();
+        for (id, scope) in [
+            (1, "https://example.com/"),
+            (2, "https://example.com/foo"),
+            (3, "https://example.com/foo/bar/"),
+        ] {
+            registry
+                .insert_registration(registration(id, "https://example.com", scope))
+                .unwrap();
+        }
+        registry
+            .insert_registration(registration(
+                4,
+                "https://other.example",
+                "https://other.example/",
+            ))
+            .unwrap();
+        registry
+    }
+
     #[test]
     fn get_registration_isolated_by_key() {
         let mut registry = Registry::new();
@@ -385,61 +463,38 @@ mod tests {
             .unwrap();
 
         // Same serialized path, different keys: each lookup returns only its own registration.
-        assert_eq!(
-            registry.get_registration(
-                &StorageKey::from_raw("https://a.example"),
-                &url("https://a.example/app/")
-            ),
-            Some(RegistrationId::from_raw(1))
-        );
-        assert_eq!(
-            registry.get_registration(
-                &StorageKey::from_raw("https://b.example"),
-                &url("https://a.example/app/")
-            ),
-            Some(RegistrationId::from_raw(2))
-        );
-        assert_eq!(
-            registry.get_registration(
-                &StorageKey::from_raw("https://c.example"),
-                &url("https://a.example/app/")
-            ),
-            None
-        );
+        for (key, expected) in [
+            ("https://a.example", Some(RegistrationId::from_raw(1))),
+            ("https://b.example", Some(RegistrationId::from_raw(2))),
+            ("https://c.example", None),
+        ] {
+            assert_eq!(
+                registry
+                    .get_registration(&StorageKey::from_raw(key), &url("https://a.example/app/")),
+                expected
+            );
+        }
     }
 
     #[test]
     fn match_registration_longest_prefix_wins() {
+        let registry = populated();
         let key = StorageKey::from_raw("https://example.com");
-        let mut registry = Registry::new();
-        for (id, scope) in [
-            (1, "https://example.com/"),
-            (2, "https://example.com/foo"),
-            (3, "https://example.com/foo/bar/"),
+        for (client, expected) in [
+            ("https://example.com/foo/bar/baz", Some(3)),
+            // Intentional R6.2.2 prefix behaviour: `/foo` matches `/foobar`.
+            ("https://example.com/foobar", Some(2)),
+            ("https://other.example/x", None),
         ] {
-            registry
-                .insert_registration(registration(id, "https://example.com", scope))
-                .unwrap();
+            assert_eq!(
+                registry.match_registration(&key, &url(client)),
+                expected.map(RegistrationId::from_raw)
+            );
         }
-
-        assert_eq!(
-            registry.match_registration(&key, &url("https://example.com/foo/bar/baz")),
-            Some(RegistrationId::from_raw(3))
-        );
-        // Intentional R6.2.2 prefix behaviour: `/foo` matches `/foobar`.
-        assert_eq!(
-            registry.match_registration(&key, &url("https://example.com/foobar")),
-            Some(RegistrationId::from_raw(2))
-        );
-        assert_eq!(
-            registry.match_registration(&key, &url("https://other.example/x")),
-            None
-        );
     }
 
     #[test]
     fn match_registration_skips_uninstalling() {
-        let key = StorageKey::from_raw("https://example.com");
         let mut registry = Registry::new();
         registry
             .insert_registration(registration(
@@ -453,6 +508,7 @@ mod tests {
         registry.insert_registration(long).unwrap();
 
         // Longest match is uninstalling: falls back to the shorter eligible registration.
+        let key = StorageKey::from_raw("https://example.com");
         assert_eq!(
             registry.match_registration(&key, &url("https://example.com/app/x")),
             Some(RegistrationId::from_raw(1))
@@ -507,23 +563,7 @@ mod tests {
 
     #[test]
     fn registrations_preserve_insertion_order() {
-        let mut registry = Registry::new();
-        for id in [1, 2, 3] {
-            registry
-                .insert_registration(registration(
-                    id,
-                    "https://example.com",
-                    &format!("https://example.com/app{id}/"),
-                ))
-                .unwrap();
-        }
-        registry
-            .insert_registration(registration(
-                4,
-                "https://other.example",
-                "https://other.example/",
-            ))
-            .unwrap();
+        let registry = populated();
 
         assert_eq!(
             registry.registrations_for_origin(&StorageKey::from_raw("https://example.com")),
@@ -612,31 +652,205 @@ mod tests {
                 "https://example.com/",
             ))
             .unwrap();
-        // Duplicate id.
-        assert!(
-            registry
-                .insert_registration(registration(
-                    1,
-                    "https://example.com",
-                    "https://example.com/other/"
-                ))
-                .is_err()
-        );
-        // Duplicate (key, scope).
-        assert!(
-            registry
-                .insert_registration(registration(
-                    2,
-                    "https://example.com",
-                    "https://example.com/#frag"
-                ))
-                .is_err()
-        );
+        // Table-driven rejection: duplicate id, duplicate (key, scope), unknown worker in
+        // `insert_worker`, duplicate worker id.
+        for (label, record) in [
+            (
+                "duplicate id",
+                registration(1, "https://example.com", "https://example.com/other/"),
+            ),
+            (
+                "duplicate (key, scope)",
+                registration(2, "https://example.com", "https://example.com/#frag"),
+            ),
+        ] {
+            assert!(registry.insert_registration(record).is_err(), "{label}");
+        }
         // Worker with unknown registration.
         assert!(registry.insert_worker(worker(10, 9)).is_err());
         // Duplicate worker id.
         registry.insert_worker(worker(10, 1)).unwrap();
         assert!(registry.insert_worker(worker(10, 1)).is_err());
+    }
+
+    #[test]
+    fn insert_registration_rejects_same_worker_in_two_slots() {
+        // On *insert* no worker can belong to the new registration yet (it does not exist, so
+        // `insert_worker` could never have registered one under its id). Per the §A-2 check
+        // order the first slot therefore fails on the back-pointer before the duplicate arm is
+        // reached — but the call still returns `Err` and leaves no trace, which is what the
+        // rework acceptance requires. The duplicate-specific message is pinned on the
+        // `replace_registration` path below, where a self-owned worker exists.
+        let mut registry = Registry::new();
+        registry
+            .insert_registration(registration(
+                2,
+                "https://example.com",
+                "https://example.com/",
+            ))
+            .unwrap();
+        registry.insert_worker(worker(10, 2)).unwrap();
+
+        let mut fresh = registration(3, "https://example.com", "https://example.com/app/");
+        fresh.installing = Some(WorkerId::from_raw(10));
+        fresh.waiting = Some(WorkerId::from_raw(10));
+        assert!(registry.insert_registration(fresh).is_err());
+        // No trace: R3 absent from the scope index and the record map.
+        assert_eq!(
+            registry.get_registration(
+                &StorageKey::from_raw("https://example.com"),
+                &url("https://example.com/app/")
+            ),
+            None
+        );
+        let mut r2 = registry
+            .registration(RegistrationId::from_raw(2))
+            .unwrap()
+            .clone();
+        r2.uninstalling = true;
+        registry.replace_registration(r2).unwrap();
+        assert!(registry.check_invariants().is_ok());
+    }
+
+    #[test]
+    fn replace_registration_rejects_same_worker_in_two_slots() {
+        let mut registry = Registry::new();
+        registry
+            .insert_registration(registration(
+                1,
+                "https://example.com",
+                "https://example.com/",
+            ))
+            .unwrap();
+        registry.insert_worker(worker(10, 1)).unwrap();
+        registry.insert_worker(worker(11, 1)).unwrap();
+        let mut record = registration(1, "https://example.com", "https://example.com/");
+        record.installing = Some(WorkerId::from_raw(10));
+        registry.replace_registration(record).unwrap();
+
+        // Same worker in `waiting` as well as `installing`: rejected, stored slots unchanged.
+        let mut doubled = registry
+            .registration(RegistrationId::from_raw(1))
+            .unwrap()
+            .clone();
+        doubled.waiting = Some(WorkerId::from_raw(10));
+        assert!(registry.replace_registration(doubled).is_err());
+        let stored = registry.registration(RegistrationId::from_raw(1)).unwrap();
+        assert_eq!(stored.installing, Some(WorkerId::from_raw(10)));
+        assert_eq!(stored.waiting, None);
+    }
+
+    #[test]
+    fn duplicate_slot_rejection_is_atomic() {
+        let mut registry = Registry::new();
+        registry
+            .insert_registration(registration(
+                1,
+                "https://example.com",
+                "https://example.com/",
+            ))
+            .unwrap();
+        registry.insert_worker(worker(10, 1)).unwrap();
+        registry.insert_worker(worker(11, 1)).unwrap();
+        let mut record = registration(1, "https://example.com", "https://example.com/");
+        record.installing = Some(WorkerId::from_raw(10));
+        record.waiting = Some(WorkerId::from_raw(11));
+        registry.replace_registration(record).unwrap();
+
+        // Snapshot every observable: lookups, slots, workers, insertion order.
+        let before_lookup = registry.get_registration(
+            &StorageKey::from_raw("https://example.com"),
+            &url("https://example.com/"),
+        );
+        let before_match = registry.match_registration(
+            &StorageKey::from_raw("https://example.com"),
+            &url("https://example.com/x"),
+        );
+        let before_slots = registry
+            .registration(RegistrationId::from_raw(1))
+            .unwrap()
+            .clone();
+        let before_workers: Vec<WorkerId> = [10, 11]
+            .into_iter()
+            .map(WorkerId::from_raw)
+            .filter(|id| registry.worker(*id).is_some())
+            .collect();
+        let before_order =
+            registry.registrations_for_origin(&StorageKey::from_raw("https://example.com"));
+
+        // Duplicate worker across `installing` and `active`: rejected.
+        let mut broken = before_slots.clone();
+        broken.active = Some(WorkerId::from_raw(10));
+        assert!(registry.replace_registration(broken).is_err());
+
+        assert_eq!(
+            registry.get_registration(
+                &StorageKey::from_raw("https://example.com"),
+                &url("https://example.com/")
+            ),
+            before_lookup
+        );
+        assert_eq!(
+            registry.match_registration(
+                &StorageKey::from_raw("https://example.com"),
+                &url("https://example.com/x")
+            ),
+            before_match
+        );
+        assert_eq!(
+            registry.registration(RegistrationId::from_raw(1)).unwrap(),
+            &before_slots
+        );
+        let after_workers: Vec<WorkerId> = [10, 11]
+            .into_iter()
+            .map(WorkerId::from_raw)
+            .filter(|id| registry.worker(*id).is_some())
+            .collect();
+        assert_eq!(after_workers, before_workers);
+        assert_eq!(
+            registry.registrations_for_origin(&StorageKey::from_raw("https://example.com")),
+            before_order
+        );
+        assert!(registry.check_invariants().is_ok());
+    }
+
+    #[test]
+    fn registry_fields_are_not_crate_public() {
+        // Encapsulation (§1.9, §4.1): `Registry` exposes no field access outside `registry.rs`.
+        // Method-only surface, exercised end to end: insert, slot via replace, every read-only
+        // accessor the checker and T-05 may use.
+        let mut registry = Registry::new();
+        registry
+            .insert_registration(registration(
+                1,
+                "https://example.com",
+                "https://example.com/",
+            ))
+            .unwrap();
+        registry.insert_worker(worker(10, 1)).unwrap();
+        let mut record = registration(1, "https://example.com", "https://example.com/");
+        record.installing = Some(WorkerId::from_raw(10));
+        registry.replace_registration(record).unwrap();
+        assert_eq!(
+            registry
+                .registration(RegistrationId::from_raw(1))
+                .unwrap()
+                .installing,
+            Some(WorkerId::from_raw(10))
+        );
+        assert!(registry.worker(WorkerId::from_raw(10)).is_some());
+        assert!(registry.worker(WorkerId::from_raw(99)).is_none());
+        assert_eq!(
+            registry.newest_worker(RegistrationId::from_raw(1)),
+            Some(WorkerId::from_raw(10))
+        );
+        assert_eq!(
+            registry.match_registration(
+                &StorageKey::from_raw("https://example.com"),
+                &url("https://example.com/x")
+            ),
+            Some(RegistrationId::from_raw(1))
+        );
     }
 
     #[test]
@@ -667,20 +881,10 @@ mod tests {
         fresh.waiting = Some(WorkerId::from_raw(10));
         assert!(registry.insert_registration(fresh).is_err());
 
-        // Foreign slots are rejected on both paths; R1/R2 still have no workers, so the
-        // worker-less rule does not apply (both are fresh registrations)... instead assert
-        // directly: slots unchanged, workers untouched, and the registry otherwise valid
-        // apart from the two fresh empty registrations.
+        // Foreign slots are rejected on both paths without partial mutation.
         assert_eq!(registry.newest_worker(RegistrationId::from_raw(1)), None);
-        assert_eq!(
-            registry
-                .registration(RegistrationId::from_raw(1))
-                .unwrap()
-                .installing,
-            None
-        );
-        // Two fresh empty non-uninstalling registrations violate rule 2 by themselves; clear
-        // that orthogonal noise before asserting the cross-slot rejection left no trace.
+        // Clear the orthogonal rule-2 noise (two fresh empty registrations) before asserting
+        // the rejection left no trace.
         for id in [1, 2] {
             let mut record = registry
                 .registration(RegistrationId::from_raw(id))

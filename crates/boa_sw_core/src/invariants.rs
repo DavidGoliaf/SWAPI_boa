@@ -6,7 +6,9 @@
 
 use std::collections::HashSet;
 
-use crate::ids::{RegistrationId, WorkerId};
+#[cfg(test)]
+use crate::ids::RegistrationId;
+use crate::ids::WorkerId;
 use crate::model::{RunState, WorkerState};
 use crate::registry::Registry;
 use crate::url_util::serialize_exclude_fragment;
@@ -198,43 +200,11 @@ impl Registry {
     }
 }
 
-/// Read-only internal views used by the checker.
-impl Registry {
-    fn registrations_for_invariants(
-        &self,
-    ) -> impl Iterator<Item = &crate::model::RegistrationRecord> {
-        self.registrations.values()
-    }
-
-    fn workers_for_invariants(&self) -> impl Iterator<Item = &crate::model::WorkerRecord> {
-        self.workers.values()
-    }
-
-    fn scope_index_for_invariants(
-        &self,
-    ) -> impl Iterator<Item = (&(crate::key::StorageKey, String), &RegistrationId)> {
-        self.by_scope.iter()
-    }
-
-    /// Test-only: inserts a record bypassing validation, to construct broken registries.
-    #[cfg(test)]
-    pub(crate) fn inject_for_test(
-        &mut self,
-        registration: Option<crate::model::RegistrationRecord>,
-        worker: Option<crate::model::WorkerRecord>,
-        index: Option<((crate::key::StorageKey, String), RegistrationId)>,
-    ) {
-        if let Some(record) = registration {
-            self.registrations.insert(record.id, record);
-        }
-        if let Some(record) = worker {
-            self.workers.insert(record.id, record);
-        }
-        if let Some((key, id)) = index {
-            self.by_scope.insert(key, id);
-        }
-    }
-}
+/// Read-only internal views used by the checker live in `registry.rs`
+/// (`registrations_for_invariants`, `workers_for_invariants`, `scope_index_for_invariants`);
+/// this module uses only those plus the public `registration()`/`worker()` accessors.
+/// (`inject_for_test` is defined in `registry.rs` next to the private storage it touches.)
+impl Registry {}
 
 #[cfg(test)]
 mod tests {

@@ -196,10 +196,11 @@ mod serde_bytes_rc {
     }
 }
 
-/// `SmallVec<[EventType; 8]>` as a plain `Vec<EventType>` on the wire.
+/// `SmallVec<[EventType; 8]>` as a plain sequence on the wire.
 ///
 /// `smallvec`'s own `serde` impls live behind its `serde` feature, which this crate does not
-/// enable (the `serde` feature here must stay dependency-free per work order `T-04` §1.7).
+/// enable (the `serde` feature here must stay dependency-free): `collect_seq`/`Vec` round-trip
+/// needs no `smallvec` impls at all.
 #[cfg(feature = "serde")]
 mod serde_smallvec_event_types {
     use smallvec::SmallVec;
@@ -222,18 +223,17 @@ mod serde_smallvec_event_types {
     }
 }
 
-/// Test-only `serde` token harness shared by this module's and `storage`'s round-trip tests.
+/// Test-only `serde` round-trip helper shared by this module's and `storage`'s tests.
 ///
 /// No format crate is involved: `Serialize` drives tokens into a `Vec<Token>` and `Deserialize`
-/// reads them back, proving both impls agree. Length-prefixed sequences carry their element
-/// count, so no end markers are needed.
+/// reads them back, proving both impls agree. Structs ride positionally (`Seq(n)` + values, no
+/// field names); newtype structs are transparent; enum variants ride as `Variant(name)` with
+/// newtype/tuple payloads inline and struct-variant payloads as bare values.
 #[cfg(all(test, feature = "serde"))]
 pub(crate) mod serde_token {
     use std::fmt;
 
-    use serde::de::{
-        self, DeserializeSeed, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor,
-    };
+    use serde::de::{self, DeserializeSeed, EnumAccess, SeqAccess, VariantAccess, Visitor};
     use serde::ser::{self, Serialize};
 
     /// One serialized datum.
@@ -259,21 +259,15 @@ pub(crate) mod serde_token {
         Some,
         /// Unit / unit struct.
         Unit,
-        /// Sequence of exactly `n` elements.
+        /// Sequence of exactly `n` elements (structs, seqs, tuples, maps as `2 * len`).
         Seq(usize),
-        /// Tuple of exactly `n` elements.
-        Tuple(usize),
-        /// Map of exactly `n` entries.
-        Map(usize),
-        /// Struct of exactly `n` fields.
-        Struct(usize),
-        /// Enum unit variant name.
+        /// Enum variant name.
         Variant(String),
     }
 
     /// Harness error.
     #[derive(Clone, Debug, PartialEq)]
-    pub struct TokenError(String);
+    pub struct TokenError(pub String);
 
     impl std::error::Error for TokenError {}
 
@@ -301,20 +295,113 @@ pub(crate) mod serde_token {
         }
     }
 
-    /// Drives `Serialize` into tokens.
+    /// Drives `Serialize` into tokens. Scalar arms the T-04 DTOs never emit
+    /// (`i8`–`i128`, `u128`, floats, `char`, length-less sequences/maps) are rejected.
     #[derive(Debug, Default)]
     pub struct TokenSerializer {
         tokens: Vec<Token>,
     }
 
     impl TokenSerializer {
-        /// Borrowed tokens, for adapter tests that serialize and deserialize in two steps.
-        #[cfg(test)]
+        /// Cloned tokens, for tests that serialize and deserialize in two steps.
         pub fn tokens_for_test(&self) -> Vec<Token> {
             self.tokens.clone()
         }
     }
 
+    /// One compound-value helper per method spelling: `element` for `Seq`/`Tuple`,
+    /// positional `field` for tuple structs/variants. (`Map`/`Struct`/`StructVariant` need
+    /// distinct `key`/`value`/`_key` shapes and stay written out below.)
+    macro_rules! impl_seq_like {
+        ($($t:ty),*) => {$(
+            impl $t for &mut TokenSerializer {
+                type Ok = ();
+                type Error = TokenError;
+                fn serialize_element<T: Serialize + ?Sized>(
+                    &mut self,
+                    value: &T,
+                ) -> Result<(), TokenError> {
+                    value.serialize(&mut **self)
+                }
+                fn end(self) -> Result<(), TokenError> {
+                    Ok(())
+                }
+            }
+        )*};
+    }
+    macro_rules! impl_field_like {
+        ($($t:ty),*) => {$(
+            impl $t for &mut TokenSerializer {
+                type Ok = ();
+                type Error = TokenError;
+                fn serialize_field<T: Serialize + ?Sized>(
+                    &mut self,
+                    value: &T,
+                ) -> Result<(), TokenError> {
+                    value.serialize(&mut **self)
+                }
+                fn end(self) -> Result<(), TokenError> {
+                    Ok(())
+                }
+            }
+        )*};
+    }
+    impl_seq_like!(ser::SerializeSeq, ser::SerializeTuple);
+    impl_field_like!(ser::SerializeTupleStruct, ser::SerializeTupleVariant);
+
+    impl ser::SerializeMap for &mut TokenSerializer {
+        type Ok = ();
+        type Error = TokenError;
+
+        fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), TokenError> {
+            key.serialize(&mut **self)
+        }
+
+        fn serialize_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), TokenError> {
+            value.serialize(&mut **self)
+        }
+
+        fn end(self) -> Result<(), TokenError> {
+            Ok(())
+        }
+    }
+
+    impl ser::SerializeStruct for &mut TokenSerializer {
+        type Ok = ();
+        type Error = TokenError;
+
+        fn serialize_field<T: Serialize + ?Sized>(
+            &mut self,
+            _key: &'static str,
+            value: &T,
+        ) -> Result<(), TokenError> {
+            value.serialize(&mut **self)
+        }
+
+        fn end(self) -> Result<(), TokenError> {
+            Ok(())
+        }
+    }
+
+    impl ser::SerializeStructVariant for &mut TokenSerializer {
+        type Ok = ();
+        type Error = TokenError;
+
+        fn serialize_field<T: Serialize + ?Sized>(
+            &mut self,
+            _key: &'static str,
+            value: &T,
+        ) -> Result<(), TokenError> {
+            value.serialize(&mut **self)
+        }
+
+        fn end(self) -> Result<(), TokenError> {
+            Ok(())
+        }
+    }
+
+    /// Scalar arms: used ones push tokens, the rest reject. Written out (not macro-generated
+    /// bodies) so each arm's encoding stays visible in review.
     impl ser::Serializer for &mut TokenSerializer {
         type Ok = ();
         type Error = TokenError;
@@ -393,9 +480,6 @@ pub(crate) mod serde_token {
         }
 
         fn serialize_bytes(self, v: &[u8]) -> Result<(), TokenError> {
-            // Byte buffers ride as `Bytes` tokens carrying the whole buffer; the deserializer
-            // routes every `deserialize_*` hint through `deserialize_any`, so `&[u8]`/`Vec<u8>`
-            // reads land on `visit_byte_buf` here.
             self.tokens.push(Token::Bytes(v.to_vec()));
             Ok(())
         }
@@ -430,14 +514,14 @@ pub(crate) mod serde_token {
             Ok(())
         }
 
+        /// Transparent newtype encoding: the inner value's tokens follow directly.
+        /// (`#[serde(transparent)]` on the id/key newtypes means no wrapper is emitted, so
+        /// none is consumed here either.)
         fn serialize_newtype_struct<T: Serialize + ?Sized>(
             self,
             _name: &'static str,
             value: &T,
         ) -> Result<(), TokenError> {
-            // Newtype structs ride as a 1-tuple so the derive's tuple-struct visitor shape
-            // matches on the way back (`deserialize_newtype_struct` consumes the marker).
-            self.tokens.push(Token::Tuple(1));
             value.serialize(&mut *self)
         }
 
@@ -458,8 +542,9 @@ pub(crate) mod serde_token {
             Ok(self)
         }
 
+        /// Tuples ride as plain sequences; only newtype *variants* keep a `Variant` marker.
         fn serialize_tuple(self, len: usize) -> Result<Self, TokenError> {
-            self.tokens.push(Token::Tuple(len));
+            self.tokens.push(Token::Seq(len));
             Ok(self)
         }
 
@@ -468,7 +553,7 @@ pub(crate) mod serde_token {
             _name: &'static str,
             len: usize,
         ) -> Result<Self, TokenError> {
-            self.tokens.push(Token::Tuple(len));
+            self.tokens.push(Token::Seq(len));
             Ok(self)
         }
 
@@ -480,10 +565,11 @@ pub(crate) mod serde_token {
             len: usize,
         ) -> Result<Self, TokenError> {
             self.tokens.push(Token::Variant(variant.to_owned()));
-            self.tokens.push(Token::Tuple(len));
+            self.tokens.push(Token::Seq(len));
             Ok(self)
         }
 
+        /// Maps flatten to `Seq(2 * len)`: keys and values interleave, no field names.
         fn serialize_map(self, len: Option<usize>) -> Result<Self, TokenError> {
             let len = len.ok_or_else(|| TokenError::custom("map without length"))?;
             self.tokens.push(Token::Seq(len * 2));
@@ -495,6 +581,8 @@ pub(crate) mod serde_token {
             Ok(self)
         }
 
+        /// Struct variants ride *without* a length marker (`Variant` + raw values); the
+        /// deserializer consumes them via `BareSeqAccess` below.
         fn serialize_struct_variant(
             self,
             _name: &'static str,
@@ -502,121 +590,9 @@ pub(crate) mod serde_token {
             variant: &'static str,
             len: usize,
         ) -> Result<Self, TokenError> {
-            // Struct variants ride *without* an extra sequence marker: `Variant` + raw
-            // values. `struct_variant` consumes values positionally via `BareSeqAccess`,
-            // so no `Tuple(len)` token is emitted here.
             self.tokens.push(Token::Variant(variant.to_owned()));
             let _ = len;
             Ok(self)
-        }
-    }
-
-    impl ser::SerializeSeq for &mut TokenSerializer {
-        type Ok = ();
-        type Error = TokenError;
-
-        fn serialize_element<T: Serialize + ?Sized>(
-            &mut self,
-            value: &T,
-        ) -> Result<(), TokenError> {
-            value.serialize(&mut **self)
-        }
-
-        fn end(self) -> Result<(), TokenError> {
-            Ok(())
-        }
-    }
-
-    impl ser::SerializeTuple for &mut TokenSerializer {
-        type Ok = ();
-        type Error = TokenError;
-
-        fn serialize_element<T: Serialize + ?Sized>(
-            &mut self,
-            value: &T,
-        ) -> Result<(), TokenError> {
-            value.serialize(&mut **self)
-        }
-
-        fn end(self) -> Result<(), TokenError> {
-            Ok(())
-        }
-    }
-
-    impl ser::SerializeTupleStruct for &mut TokenSerializer {
-        type Ok = ();
-        type Error = TokenError;
-
-        fn serialize_field<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), TokenError> {
-            value.serialize(&mut **self)
-        }
-
-        fn end(self) -> Result<(), TokenError> {
-            Ok(())
-        }
-    }
-
-    impl ser::SerializeTupleVariant for &mut TokenSerializer {
-        type Ok = ();
-        type Error = TokenError;
-
-        fn serialize_field<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), TokenError> {
-            value.serialize(&mut **self)
-        }
-
-        fn end(self) -> Result<(), TokenError> {
-            Ok(())
-        }
-    }
-
-    impl ser::SerializeMap for &mut TokenSerializer {
-        type Ok = ();
-        type Error = TokenError;
-
-        fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), TokenError> {
-            key.serialize(&mut **self)
-        }
-
-        fn serialize_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), TokenError> {
-            value.serialize(&mut **self)
-        }
-
-        fn end(self) -> Result<(), TokenError> {
-            Ok(())
-        }
-    }
-
-    impl ser::SerializeStruct for &mut TokenSerializer {
-        type Ok = ();
-        type Error = TokenError;
-
-        fn serialize_field<T: Serialize + ?Sized>(
-            &mut self,
-            _key: &'static str,
-            value: &T,
-        ) -> Result<(), TokenError> {
-            value.serialize(&mut **self)
-        }
-
-        fn end(self) -> Result<(), TokenError> {
-            Ok(())
-        }
-    }
-
-    impl ser::SerializeStructVariant for &mut TokenSerializer {
-        type Ok = ();
-        type Error = TokenError;
-
-        fn serialize_field<T: Serialize + ?Sized>(
-            &mut self,
-            _key: &'static str,
-            value: &T,
-        ) -> Result<(), TokenError> {
-            value.serialize(&mut **self)
-        }
-
-        fn end(self) -> Result<(), TokenError> {
-            Ok(())
         }
     }
 
@@ -677,79 +653,23 @@ pub(crate) mod serde_token {
         }
     }
 
-    /// Length-prefixed map access.
-    pub(crate) struct MapAccessImpl<'a, 'de> {
-        pub(crate) de: &'a mut TokenDeserializer<'de>,
-        pub(crate) remaining: usize,
+    /// Sequence access over a bare token stream with no length marker: yields elements until
+    /// the stream is exhausted. Only for struct-variant payloads (`Variant` + raw values).
+    struct BareSeqAccess<'a, 'de> {
+        de: &'a mut TokenDeserializer<'de>,
     }
 
-    impl<'de> MapAccess<'de> for MapAccessImpl<'_, 'de> {
+    impl<'de> SeqAccess<'de> for BareSeqAccess<'_, 'de> {
         type Error = TokenError;
 
-        fn next_key_seed<K: DeserializeSeed<'de>>(
+        fn next_element_seed<T: DeserializeSeed<'de>>(
             &mut self,
-            seed: K,
-        ) -> Result<Option<K::Value>, TokenError> {
-            if self.remaining == 0 {
+            seed: T,
+        ) -> Result<Option<T::Value>, TokenError> {
+            if self.de.is_empty() {
                 return Ok(None);
             }
-            self.remaining -= 1;
             seed.deserialize(&mut *self.de).map(Some)
-        }
-
-        fn next_value_seed<V: DeserializeSeed<'de>>(
-            &mut self,
-            seed: V,
-        ) -> Result<V::Value, TokenError> {
-            seed.deserialize(&mut *self.de)
-        }
-    }
-
-    // `MapAccessImpl` is exercised through `probe_map_access` below: the harness never emits
-    // `Map` markers itself (maps flatten to `Seq`), so the test drives the impl directly.
-    #[cfg(test)]
-    #[test]
-    fn serde_token_map_access_shape() {
-        use super::serde_token::{MapAccessImpl, Token, TokenDeserializer};
-        use serde::de::MapAccess as _;
-
-        struct PhantomU32;
-        impl<'de> serde::de::DeserializeSeed<'de> for PhantomU32 {
-            type Value = u32;
-            fn deserialize<D: serde::Deserializer<'de>>(
-                self,
-                deserializer: D,
-            ) -> Result<u32, D::Error> {
-                serde::Deserialize::deserialize(deserializer)
-            }
-        }
-
-        let tokens = vec![Token::Str(String::from("k")), Token::U32(7)];
-        let mut de = TokenDeserializer::new(&tokens);
-        let mut access = MapAccessImpl {
-            de: &mut de,
-            remaining: 1,
-        };
-        let key: String = access.next_key_seed(PhantomStr).unwrap().unwrap();
-        assert_eq!(key, "k");
-        let value: u32 = access.next_value_seed(PhantomU32).unwrap();
-        assert_eq!(value, 7);
-        let none: Option<String> = access.next_key_seed(PhantomStr).unwrap();
-        assert_eq!(none, None);
-    }
-
-    /// Test seed reading a `String` from the token stream.
-    #[cfg(all(test, feature = "serde"))]
-    struct PhantomStr;
-
-    #[cfg(all(test, feature = "serde"))]
-    impl<'de> serde::de::DeserializeSeed<'de> for PhantomStr {
-        type Value = String;
-        fn deserialize<D: serde::Deserializer<'de>>(
-            self,
-            deserializer: D,
-        ) -> Result<String, D::Error> {
-            serde::Deserialize::deserialize(deserializer)
         }
     }
 
@@ -796,25 +716,22 @@ pub(crate) mod serde_token {
             Ok(())
         }
 
+        /// Newtype variants carry one transparently-encoded positional value.
         fn newtype_variant_seed<T: DeserializeSeed<'de>>(
             self,
             seed: T,
         ) -> Result<T::Value, TokenError> {
-            // Newtype tuple variants (`Put(CacheEntry)`, `PutRegistration(..)`) carry one
-            // positional value: the harness encodes it transparently, so read the next token
-            // directly.
             seed.deserialize(&mut *self.de)
         }
 
+        /// Tuple variants are length-prefixed (`Variant` + `Seq(n)` + values).
         fn tuple_variant<V: Visitor<'de>>(
             self,
             _len: usize,
             visitor: V,
         ) -> Result<V::Value, TokenError> {
-            // Tuple variants are length-prefixed (`Variant` + `Tuple(n)` + values): consume
-            // the marker, then read positionally.
             match self.de.next()? {
-                Token::Tuple(len) => {
+                Token::Seq(len) => {
                     let len = *len;
                     visitor.visit_seq(SeqAccessImpl {
                         de: self.de,
@@ -822,7 +739,7 @@ pub(crate) mod serde_token {
                     })
                 }
                 other => Err(TokenError::custom(format!(
-                    "expected tuple marker, found {other:?}"
+                    "expected sequence marker, found {other:?}"
                 ))),
             }
         }
@@ -832,39 +749,16 @@ pub(crate) mod serde_token {
             _fields: &'static [&'static str],
             visitor: V,
         ) -> Result<V::Value, TokenError> {
-            // Struct variants ride *without* a length marker (`Variant` + raw values): hand
-            // the visitor the bare token stream directly.
             visitor.visit_seq(BareSeqAccess { de: self.de })
-        }
-    }
-
-    /// Sequence access over a bare token stream with no length marker: yields elements until
-    /// the stream is exhausted. Only for struct-variant payloads, whose harness encoding is
-    /// `Variant` + raw values.
-    struct BareSeqAccess<'a, 'de> {
-        de: &'a mut TokenDeserializer<'de>,
-    }
-
-    impl<'de> SeqAccess<'de> for BareSeqAccess<'_, 'de> {
-        type Error = TokenError;
-
-        fn next_element_seed<T: DeserializeSeed<'de>>(
-            &mut self,
-            seed: T,
-        ) -> Result<Option<T::Value>, TokenError> {
-            if self.de.is_empty() {
-                return Ok(None);
-            }
-            seed.deserialize(&mut *self.de).map(Some)
         }
     }
 
     impl<'de> de::Deserializer<'de> for &mut TokenDeserializer<'de> {
         type Error = TokenError;
 
-        /// Routes every concrete hint through `deserialize_any`: the token stream is
-        /// self-describing, so `deserialize_u8` and friends must not demand a mismatched token
-        /// kind — they only constrain how the visitor interprets the next token.
+        /// The token stream is self-describing: every concrete hint routes here, and the next
+        /// token decides how the visitor is fed. The only dedicated hint is `deserialize_u8`,
+        /// so bare `U8` tokens survive struct-variant payloads without demanding a sequence.
         fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TokenError> {
             match self.next()? {
                 Token::Bool(v) => visitor.visit_bool(*v),
@@ -877,7 +771,7 @@ pub(crate) mod serde_token {
                 Token::None => visitor.visit_none(),
                 Token::Some => visitor.visit_some(&mut *self),
                 Token::Unit => visitor.visit_unit(),
-                Token::Seq(len) | Token::Tuple(len) | Token::Map(len) | Token::Struct(len) => {
+                Token::Seq(len) => {
                     let len = *len;
                     visitor.visit_seq(SeqAccessImpl {
                         de: self,
@@ -908,22 +802,13 @@ pub(crate) mod serde_token {
             }
         }
 
+        /// Transparent newtype encoding: the inner value's tokens follow directly.
         fn deserialize_newtype_struct<V: Visitor<'de>>(
             self,
             _name: &'static str,
             visitor: V,
         ) -> Result<V::Value, TokenError> {
-            // Serializer side wraps the inner value in `Tuple(1)`: consume the marker, then
-            // read the single value through the tuple-struct visitor shape.
-            match self.next()? {
-                Token::Tuple(1) => visitor.visit_seq(SeqAccessImpl {
-                    de: self,
-                    remaining: 1,
-                }),
-                other => Err(TokenError::custom(format!(
-                    "expected 1-tuple marker, found {other:?}"
-                ))),
-            }
+            self.deserialize_any(visitor)
         }
 
         fn deserialize_u8<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TokenError> {
@@ -959,114 +844,54 @@ pub(crate) mod serde_token {
         back
     }
 
-    /// Test probes exercising serializer arms no DTO uses directly (tuple-struct shape and
-    /// unit-struct marker). Returns the observed tokens for assertion at the call site.
-    #[cfg(test)]
-    pub fn probe_tuple_struct() -> Vec<Token> {
-        struct TupleStruct(u8, u16);
-        impl Serialize for TupleStruct {
-            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                use serde::ser::SerializeTupleStruct as _;
-                let mut state = serializer.serialize_tuple_struct("TupleStruct", 2)?;
-                state.serialize_field(&self.0)?;
-                state.serialize_field(&self.1)?;
-                state.end()
-            }
-        }
+    /// Drives a probe through one serializer arm and returns the emitted tokens.
+    pub fn tokens_of<F>(emit: F) -> Vec<Token>
+    where
+        F: FnOnce(&mut TokenSerializer),
+    {
         let mut serializer = TokenSerializer::default();
-        TupleStruct(1, 2).serialize(&mut serializer).unwrap();
+        emit(&mut serializer);
         serializer.tokens_for_test()
     }
 
-    /// Test probe for the unit-struct serializer arm.
-    #[cfg(test)]
-    pub fn probe_unit_struct() -> Vec<Token> {
-        struct UnitStruct;
-        impl Serialize for UnitStruct {
-            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                serializer.serialize_unit_struct("UnitStruct")
+    /// Length-prefixed map access, exposed for its dedicated shape test below (the
+    /// harness itself flattens maps to `Seq`, so no DTO drives this impl directly).
+    pub(crate) struct MapAccessImpl<'a, 'de> {
+        pub(crate) de: &'a mut TokenDeserializer<'de>,
+        pub(crate) remaining: usize,
+    }
+
+    impl<'de> de::MapAccess<'de> for MapAccessImpl<'_, 'de> {
+        type Error = TokenError;
+
+        fn next_key_seed<K: de::DeserializeSeed<'de>>(
+            &mut self,
+            seed: K,
+        ) -> Result<Option<K::Value>, TokenError> {
+            if self.remaining == 0 {
+                return Ok(None);
             }
+            self.remaining -= 1;
+            seed.deserialize(&mut *self.de).map(Some)
         }
-        let mut serializer = TokenSerializer::default();
-        UnitStruct.serialize(&mut serializer).unwrap();
-        serializer.tokens_for_test()
+
+        fn next_value_seed<V: de::DeserializeSeed<'de>>(
+            &mut self,
+            seed: V,
+        ) -> Result<V::Value, TokenError> {
+            seed.deserialize(&mut *self.de)
+        }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[cfg(all(test, feature = "serde"))]
+mod serde_token_tests {
+    use super::serde_token::{Token, TokenDeserializer, TokenSerializer};
+    use serde::Serializer as _;
 
-    fn url(s: &str) -> Url {
-        Url::parse(s).unwrap()
-    }
-
-    fn worker_record() -> WorkerRecord {
-        WorkerRecord {
-            id: WorkerId::from_raw(1),
-            registration: RegistrationId::from_raw(1),
-            script_url: url("https://example.com/sw.js"),
-            worker_type: WorkerType::Classic,
-            state: WorkerState::Parsed,
-            skip_waiting: false,
-            imported_scripts_updated: false,
-            has_fetch_handler: None,
-            handled_event_types: SmallVec::new(),
-            run_state: RunState::NotRunning,
-            pending_events: 0,
-            last_activity_ms: 0,
-        }
-    }
-
-    fn registration_record() -> RegistrationRecord {
-        RegistrationRecord {
-            id: RegistrationId::from_raw(1),
-            storage_key: StorageKey::from_raw("https://example.com"),
-            scope: url("https://example.com/"),
-            update_via_cache: UpdateViaCache::Imports,
-            installing: None,
-            waiting: None,
-            active: None,
-            last_update_check_ms: None,
-            navigation_preload_enabled: false,
-            navigation_preload_header: String::from("true"),
-            uninstalling: false,
-        }
-    }
-
+    /// Every unused scalar arm rejects instead of emitting.
     #[test]
-    fn defaults_are_spec_values() {
-        let worker = worker_record();
-        assert_eq!(worker.state, WorkerState::Parsed);
-        assert!(!worker.skip_waiting);
-        assert!(!worker.imported_scripts_updated);
-        assert_eq!(worker.has_fetch_handler, None);
-        assert!(worker.handled_event_types.is_empty());
-        assert_eq!(worker.run_state, RunState::NotRunning);
-        assert_eq!(worker.pending_events, 0);
-
-        let registration = registration_record();
-        assert_eq!(registration.update_via_cache, UpdateViaCache::Imports);
-        assert!(!registration.navigation_preload_enabled);
-        assert_eq!(registration.navigation_preload_header, "true");
-        assert_eq!(registration.installing, None);
-        assert_eq!(registration.waiting, None);
-        assert_eq!(registration.active, None);
-        assert!(!registration.uninstalling);
-    }
-
-    #[test]
-    fn update_via_cache_default_is_imports() {
-        assert_eq!(UpdateViaCache::default(), UpdateViaCache::Imports);
-    }
-
-    #[cfg(feature = "serde")]
-    #[test]
-    fn serde_token_harness_rejects_unused_types() {
-        use super::serde_token::{Token, TokenDeserializer, TokenSerializer};
-        use serde::Serializer as _;
-
-        // Every "not used by T-04 DTOs" serializer arm returns an error, never a token.
+    fn rejects_unused_types() {
         let mut serializer = TokenSerializer::default();
         assert!(serializer.serialize_i8(0).is_err());
         assert!(serializer.serialize_i16(0).is_err());
@@ -1081,30 +906,52 @@ mod tests {
         assert!(serializer.serialize_map(None).is_err());
         assert!(TokenDeserializer::new(&[]).is_empty());
 
-        // `Token`/`TokenError` debug + display rendering is stable (used in diagnostics).
         let token = Token::Variant(String::from("Put"));
         assert_eq!(format!("{token:?}"), "Variant(\"Put\")");
         assert_eq!(TokenDeserializer::new(&[token]).rest().len(), 1);
     }
 
-    #[cfg(feature = "serde")]
+    /// Marker arms (tuple/tuple-struct/unit-struct) plus deserializer error arms.
     #[test]
-    fn serde_token_harness_remaining_arms() {
-        use super::serde_token::{Token, TokenDeserializer};
+    fn remaining_arms() {
+        use super::serde_token::tokens_of;
+        use serde::ser::Serialize as _;
 
-        // Tuple / tuple-struct / tuple-variant / struct-variant arms produce the exact marker
-        // tokens the deserializer consumes; map arm doubles key/value counts into one `Seq`.
-        let (tuple_tokens, unit_tokens) = (
-            super::serde_token::probe_tuple_struct(),
-            super::serde_token::probe_unit_struct(),
+        assert_eq!(
+            tokens_of(|s| {
+                struct TupleStruct(u8, u16);
+                impl serde::ser::Serialize for TupleStruct {
+                    fn serialize<S: serde::Serializer>(
+                        &self,
+                        serializer: S,
+                    ) -> Result<S::Ok, S::Error> {
+                        use serde::ser::SerializeTupleStruct as _;
+                        let mut state = serializer.serialize_tuple_struct("TupleStruct", 2)?;
+                        state.serialize_field(&self.0)?;
+                        state.serialize_field(&self.1)?;
+                        state.end()
+                    }
+                }
+                TupleStruct(1, 2).serialize(s).unwrap();
+            }),
+            vec![Token::Seq(2), Token::U8(1), Token::U16(2)]
         );
         assert_eq!(
-            tuple_tokens,
-            vec![Token::Tuple(2), Token::U8(1), Token::U16(2)]
+            tokens_of(|s| {
+                struct UnitStruct;
+                impl serde::ser::Serialize for UnitStruct {
+                    fn serialize<S: serde::Serializer>(
+                        &self,
+                        serializer: S,
+                    ) -> Result<S::Ok, S::Error> {
+                        serializer.serialize_unit_struct("UnitStruct")
+                    }
+                }
+                UnitStruct.serialize(s).unwrap();
+            }),
+            vec![Token::Unit]
         );
-        assert_eq!(unit_tokens, vec![Token::Unit]);
 
-        // `deserialize_any` on `Variant` + every error arm of the harness deserializer.
         let tokens = [Token::Variant(String::from("V"))];
         let mut de = TokenDeserializer::new(&tokens);
         let back = <String as serde::Deserialize>::deserialize(&mut de)
@@ -1120,68 +967,49 @@ mod tests {
         assert!(err.contains("end of tokens"), "{err}");
     }
 
-    #[cfg(feature = "serde")]
-    #[test]
-    fn serde_token_struct_shape() {
-        // Full struct round-trip through `SeqAccess`: a two-field struct survives the
-        // positional encoding, pinning the struct + `SeqAccess` + `next_element` path.
-        serde_token_point_shape();
-    }
-
-    #[cfg(feature = "serde")]
+    /// Compound arms (`Seq`/`Map`/`Struct`/struct-variant probe) round-trip.
     #[test]
     #[allow(clippy::too_many_lines)]
-    fn serde_token_compound_arms_round_trip() {
-        use super::serde_token::{Token, TokenDeserializer, TokenSerializer};
+    fn compound_arms_round_trip() {
+        use super::serde_token::{TokenDeserializer, tokens_of};
 
-        // `SerializeSeq` / `SerializeTuple` / `SerializeMap` / `SerializeStruct` compound arms:
-        // drive values through them and read them back through the matching token shapes.
-        // (`Serializer` is implemented for `&mut TokenSerializer`, hence the reborrows.)
-        let mut serializer = TokenSerializer::default();
-        {
-            let serializer_ref = &mut serializer;
+        let tokens = tokens_of(|s| {
+            let serializer_ref = s;
             let mut seq =
                 <&mut TokenSerializer as serde::Serializer>::serialize_seq(serializer_ref, Some(2))
                     .unwrap();
             <_ as serde::ser::SerializeSeq>::serialize_element(&mut seq, &1_u8).unwrap();
             <_ as serde::ser::SerializeSeq>::serialize_element(&mut seq, &2_u16).unwrap();
             <_ as serde::ser::SerializeSeq>::end(seq).unwrap();
-        }
-        let tokens = serializer.tokens_for_test();
+        });
         assert_eq!(tokens, vec![Token::Seq(2), Token::U8(1), Token::U16(2)]);
-        // The `Seq(2)` marker is consumed by sequence-shaped reads (`SeqAccess` via structs
-        // and tuples); scalar reads below consume the bare value tokens directly.
         let mut de = TokenDeserializer::new(&tokens[1..]);
         let first: u8 = serde::Deserialize::deserialize(&mut de).unwrap();
         assert_eq!(first, 1);
-        let tokens = serializer.tokens_for_test();
         let mut de = TokenDeserializer::new(&tokens[2..]);
         let second: u16 = serde::Deserialize::deserialize(&mut de).unwrap();
         assert_eq!(second, 2);
         assert!(de.is_empty());
 
-        let mut serializer = TokenSerializer::default();
-        {
-            let serializer_ref = &mut serializer;
+        let tokens = tokens_of(|s| {
+            let serializer_ref = s;
             let mut map =
                 <&mut TokenSerializer as serde::Serializer>::serialize_map(serializer_ref, Some(1))
                     .unwrap();
             <_ as serde::ser::SerializeMap>::serialize_key(&mut map, "k").unwrap();
             <_ as serde::ser::SerializeMap>::serialize_value(&mut map, &7_u32).unwrap();
             <_ as serde::ser::SerializeMap>::end(map).unwrap();
-        }
-        // Map arm doubles key/value count into one flat `Seq(2)`.
-        let tokens = serializer.tokens_for_test();
+        });
         assert_eq!(
             tokens,
             vec![Token::Seq(2), Token::Str(String::from("k")), Token::U32(7)]
         );
 
-        // Struct arm is positional: fields land as a flat sequence, no field names.
-        // `Point` pins the exact tokens (`Seq(2)` + two bare values) so the encoding stays
-        // self-describing; see `serde_token_struct_shape` for the full struct round-trip.
-        serde_token_point_tokens();
-        // `u8` fields read through `deserialize_u8` on bare tokens.
+        // Structs are positional (`Seq(2)` + bare values, no field names).
+        assert_eq!(
+            super::serde_token_tests::point_tokens(),
+            vec![Token::Seq(2), Token::U8(3), Token::U8(4)]
+        );
         let bare = [Token::U8(3)];
         let mut de = TokenDeserializer::new(&bare);
         let x: u8 = serde::Deserialize::deserialize(&mut de).unwrap();
@@ -1191,17 +1019,14 @@ mod tests {
         let y: u8 = serde::Deserialize::deserialize(&mut de).unwrap();
         assert_eq!((x, y), (3, 4));
 
-        // `MapAccess`/`VariantName`/`variant_seed` arms: drive an enum + struct-variant
-        // tokens. Only unit and struct variants are exercised: the newtype-variant seed path
-        // is already covered by `StorageOp`/`CacheOperation` round-trips through `round_trip`.
-        serde_token_probe_enum();
+        // Enum + struct-variant path (`VariantName`, `variant_seed`, `BareSeqAccess`).
+        super::serde_token_tests::probe_enum();
     }
 
     /// Tokens emitted by the positional struct encoding: `Seq(2)` + bare values.
     #[cfg(all(test, feature = "serde"))]
-    fn serde_token_point_tokens() {
-        use super::serde_token::{Token, TokenSerializer};
-        use serde::ser::Serialize as _;
+    pub(super) fn point_tokens() -> Vec<Token> {
+        use super::serde_token::tokens_of;
 
         struct Point {
             x: u8,
@@ -1216,32 +1041,15 @@ mod tests {
                 state.end()
             }
         }
-        let mut serializer = TokenSerializer::default();
-        Point { x: 3, y: 4 }.serialize(&mut serializer).unwrap();
-        assert_eq!(
-            serializer.tokens_for_test(),
-            vec![Token::Seq(2), Token::U8(3), Token::U8(4)]
-        );
-    }
-
-    /// Reads a two-field point from a positional sequence.
-    #[cfg(all(test, feature = "serde"))]
-    fn serde_token_point_from_seq<'a, A>(mut seq: A) -> Result<(u8, u8), A::Error>
-    where
-        A: serde::de::SeqAccess<'a>,
-    {
-        let x: u8 = seq
-            .next_element()?
-            .ok_or_else(|| serde::de::Error::custom("missing x"))?;
-        let y: u8 = seq
-            .next_element()?
-            .ok_or_else(|| serde::de::Error::custom("missing y"))?;
-        Ok((x, y))
+        tokens_of(|s| {
+            use serde::ser::Serialize as _;
+            Point { x: 3, y: 4 }.serialize(s).unwrap();
+        })
     }
 
     /// Two-field struct round-trip through the positional struct encoding.
-    #[cfg(all(test, feature = "serde"))]
-    fn serde_token_point_shape() {
+    #[test]
+    fn struct_shape() {
         use super::serde_token::{Token, TokenSerializer, round_trip};
         use serde::ser::Serialize as _;
 
@@ -1269,9 +1077,14 @@ mod tests {
                     }
                     fn visit_seq<A: serde::de::SeqAccess<'de>>(
                         self,
-                        seq: A,
+                        mut seq: A,
                     ) -> Result<Point, A::Error> {
-                        let (x, y) = crate::model::tests::serde_token_point_from_seq(seq)?;
+                        let x: u8 = seq
+                            .next_element()?
+                            .ok_or_else(|| serde::de::Error::custom("missing x"))?;
+                        let y: u8 = seq
+                            .next_element()?
+                            .ok_or_else(|| serde::de::Error::custom("missing y"))?;
                         Ok(Point { x, y })
                     }
                 }
@@ -1287,12 +1100,51 @@ mod tests {
         assert_eq!(round_trip(&Point { x: 3, y: 4 }), Point { x: 3, y: 4 });
     }
 
-    /// Probe enum exercising the harness's enum + struct-variant path (`VariantName`,
-    /// `variant_seed`, `BareSeqAccess`). Only unit and struct variants: the newtype-variant
-    /// seed path is already covered by `StorageOp`/`CacheOperation` round-trips.
-    #[cfg(all(test, feature = "serde"))]
+    /// Length-prefixed map access driven directly (the harness flattens maps to `Seq`).
+    #[test]
+    fn map_access_shape() {
+        use super::serde_token::{MapAccessImpl, Token, TokenDeserializer};
+        use serde::de::MapAccess as _;
+
+        struct PhantomU32;
+        impl<'de> serde::de::DeserializeSeed<'de> for PhantomU32 {
+            type Value = u32;
+            fn deserialize<D: serde::Deserializer<'de>>(
+                self,
+                deserializer: D,
+            ) -> Result<u32, D::Error> {
+                serde::Deserialize::deserialize(deserializer)
+            }
+        }
+
+        struct PhantomStr;
+        impl<'de> serde::de::DeserializeSeed<'de> for PhantomStr {
+            type Value = String;
+            fn deserialize<D: serde::Deserializer<'de>>(
+                self,
+                deserializer: D,
+            ) -> Result<String, D::Error> {
+                serde::Deserialize::deserialize(deserializer)
+            }
+        }
+
+        let tokens = vec![Token::Str(String::from("k")), Token::U32(7)];
+        let mut de = TokenDeserializer::new(&tokens);
+        let mut access = MapAccessImpl {
+            de: &mut de,
+            remaining: 1,
+        };
+        let key: String = access.next_key_seed(PhantomStr).unwrap().unwrap();
+        assert_eq!(key, "k");
+        let value: u32 = access.next_value_seed(PhantomU32).unwrap();
+        assert_eq!(value, 7);
+        let none: Option<String> = access.next_key_seed(PhantomStr).unwrap();
+        assert_eq!(none, None);
+    }
+
+    /// Probe enum exercising the harness's enum + struct-variant path.
     #[allow(clippy::too_many_lines)]
-    fn serde_token_probe_enum() {
+    pub(super) fn probe_enum() {
         use super::serde_token::{TokenDeserializer, round_trip};
 
         enum Probe {
@@ -1351,8 +1203,6 @@ mod tests {
             }
             #[allow(clippy::needless_lifetimes)]
             fn visit_seq<A: serde::de::SeqAccess<'a>>(self, mut seq: A) -> Result<u8, A::Error> {
-                // `BareSeqAccess` yields raw payload tokens: read the single `U8` through
-                // its own hint so no sequence shape is demanded.
                 let value: u8 = seq
                     .next_element_seed(BareU8)?
                     .ok_or_else(|| serde::de::Error::custom("empty"))?;
@@ -1434,7 +1284,6 @@ mod tests {
                 }
             }
         }
-        // `OneU8Seed` exercises the bare-`U8`-token read path used by transparent newtypes.
         let tokens = [super::serde_token::Token::U8(7)];
         let mut de = TokenDeserializer::new(&tokens);
         let back: u8 = serde::Deserialize::deserialize(&mut de).unwrap();
@@ -1444,26 +1293,56 @@ mod tests {
         assert_eq!(round_trip(&Probe::Struct { a: 5 }), Probe::Struct { a: 5 });
     }
 
-    #[cfg(feature = "serde")]
+    /// One round-trip per record/DTO family plus every enum variant (parent work order §7).
     #[test]
-    fn serde_round_trip_records() {
+    fn round_trip_records() {
         use super::serde_token::round_trip;
+        use super::{
+            EventType, RegistrationId, RegistrationRecord, RunState, ScriptResource, StorageKey,
+            UpdateViaCache, WorkerId, WorkerRecord, WorkerState, WorkerType,
+        };
+        use smallvec::SmallVec;
+        use std::rc::Rc;
+        use url::Url;
 
-        let mut worker = worker_record();
-        worker.handled_event_types = SmallVec::from_vec(vec![
-            EventType::Install,
-            EventType::Fetch,
-            EventType::Message,
-        ]);
-        worker.has_fetch_handler = Some(true);
-        let back = round_trip(&worker);
-        assert_eq!(back, worker);
+        fn url(s: &str) -> Url {
+            Url::parse(s).unwrap()
+        }
 
-        let mut registration = registration_record();
-        registration.installing = Some(WorkerId::from_raw(1));
-        registration.last_update_check_ms = Some(1_700_000_000_000);
-        let back = round_trip(&registration);
-        assert_eq!(back, registration);
+        let worker = WorkerRecord {
+            id: WorkerId::from_raw(1),
+            registration: RegistrationId::from_raw(1),
+            script_url: url("https://example.com/sw.js"),
+            worker_type: WorkerType::Classic,
+            state: WorkerState::Parsed,
+            skip_waiting: false,
+            imported_scripts_updated: false,
+            has_fetch_handler: Some(true),
+            handled_event_types: SmallVec::from_vec(vec![
+                EventType::Install,
+                EventType::Fetch,
+                EventType::Message,
+            ]),
+            run_state: RunState::NotRunning,
+            pending_events: 0,
+            last_activity_ms: 0,
+        };
+        assert_eq!(round_trip(&worker), worker);
+
+        let registration = RegistrationRecord {
+            id: RegistrationId::from_raw(1),
+            storage_key: StorageKey::from_raw("https://example.com"),
+            scope: url("https://example.com/"),
+            update_via_cache: UpdateViaCache::Imports,
+            installing: Some(WorkerId::from_raw(1)),
+            waiting: None,
+            active: None,
+            last_update_check_ms: Some(1_700_000_000_000),
+            navigation_preload_enabled: false,
+            navigation_preload_header: String::from("true"),
+            uninstalling: false,
+        };
+        assert_eq!(round_trip(&registration), registration);
 
         let resource = ScriptResource {
             url: url("https://example.com/sw.js"),
@@ -1516,114 +1395,5 @@ mod tests {
         ] {
             assert_eq!(round_trip(&event_type), event_type);
         }
-    }
-
-    #[test]
-    fn model_records_debug_is_stable() {
-        // `insta` snapshot of the `Debug` rendering: adding/removing a field breaks the
-        // snapshot loudly, which is the observable part of the §3 API contract this task can
-        // pin without a serde-capable test serializer.
-        insta::assert_debug_snapshot!(worker_record(), @"WorkerRecord {
-    id: WorkerId(
-        1,
-    ),
-    registration: RegistrationId(
-        1,
-    ),
-    script_url: Url {
-        scheme: \"https\",
-        cannot_be_a_base: false,
-        username: \"\",
-        password: None,
-        host: Some(
-            Domain(
-                \"example.com\",
-            ),
-        ),
-        port: None,
-        path: \"/sw.js\",
-        query: None,
-        fragment: None,
-    },
-    worker_type: Classic,
-    state: Parsed,
-    skip_waiting: false,
-    imported_scripts_updated: false,
-    has_fetch_handler: None,
-    handled_event_types: [],
-    run_state: NotRunning,
-    pending_events: 0,
-    last_activity_ms: 0,
-}");
-        insta::assert_debug_snapshot!(registration_record(), @"RegistrationRecord {
-    id: RegistrationId(
-        1,
-    ),
-    storage_key: StorageKey(
-        \"https://example.com\",
-    ),
-    scope: Url {
-        scheme: \"https\",
-        cannot_be_a_base: false,
-        username: \"\",
-        password: None,
-        host: Some(
-            Domain(
-                \"example.com\",
-            ),
-        ),
-        port: None,
-        path: \"/\",
-        query: None,
-        fragment: None,
-    },
-    update_via_cache: Imports,
-    installing: None,
-    waiting: None,
-    active: None,
-    last_update_check_ms: None,
-    navigation_preload_enabled: false,
-    navigation_preload_header: \"true\",
-    uninstalling: false,
-}");
-    }
-
-    #[test]
-    fn script_resource_map_preserves_absolute_url_keys() {
-        let mut map: ScriptResourceMap = IndexMap::new();
-        let first = ScriptResource {
-            url: url("https://example.com/a.js"),
-            bytes: Rc::from(b"a".as_slice()),
-            sha256: [1; 32],
-            mime: String::from("text/javascript"),
-            service_worker_allowed: None,
-            is_main: true,
-        };
-        let second = ScriptResource {
-            url: url("https://example.com/b.js"),
-            bytes: Rc::from(b"bb".as_slice()),
-            sha256: [2; 32],
-            mime: String::from("application/javascript"),
-            service_worker_allowed: Some(String::from("/")),
-            is_main: false,
-        };
-        map.insert(first.url.clone(), first);
-        map.insert(second.url.clone(), second);
-
-        assert_eq!(map.len(), 2);
-        let main = &map[&url("https://example.com/a.js")];
-        assert!(main.is_main);
-        assert_eq!(main.mime, "text/javascript");
-        assert_eq!(&*main.bytes, b"a");
-        assert_eq!(main.sha256, [1; 32]);
-        // Insertion order preserved.
-        let keys: Vec<&Url> = map.keys().collect();
-        assert_eq!(
-            keys,
-            [
-                &url("https://example.com/a.js"),
-                &url("https://example.com/b.js")
-            ]
-        );
     }
 }

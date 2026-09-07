@@ -27,12 +27,12 @@ Two tables, both required by TS §15.2.2 and checked at release by `scripts/chec
 | `R4.2.7` | `crates/boa_sw_core/src/storage.rs` | `storage::tests::trait_signature_smoke` | T-04 |
 | `R4.2.8` | `crates/boa_sw_core/src/storage.rs` | `storage::tests::trait_signature_smoke` | T-04 |
 | `R6.1.3` | `crates/boa_sw_core/src/registry.rs` | `registry::tests::scope_with_fragment_is_normalized_on_insert`, `registry::tests::get_registration_isolated_by_key` | T-04 |
-| `R6.3.1` | `crates/boa_sw_core/src/model.rs` | `model::tests::serde_round_trip_records` | T-04 |
-| `R6.3.2` | `crates/boa_sw_core/src/registry.rs` | `registry::tests::replace_methods_preserve_indexes` | T-04 |
+| `R6.3.1` | `crates/boa_sw_core/src/model.rs` | `serde_token_tests::round_trip_records`, `model::tests::defaults_are_spec_values` | T-04 |
+| `R6.3.2` | `crates/boa_sw_core/src/registry.rs` | `registry::tests::replace_methods_preserve_indexes`, `registry::tests::insert_registration_rejects_same_worker_in_two_slots`, `registry::tests::replace_registration_rejects_same_worker_in_two_slots`, `registry::tests::duplicate_slot_rejection_is_atomic`, `registry::tests::registry_fields_are_not_crate_public` | T-04 |
 | `R6.4.5` | `crates/boa_sw_core/src/model.rs` | `model::tests::script_resource_map_preserves_absolute_url_keys` | T-04 |
 | `R6.5.1` | `crates/boa_sw_core/src/registry.rs` | `registry::tests::newest_worker_precedence` | T-04 |
 | `R6.5.2` | `crates/boa_sw_core/src/registry.rs` | `registry::tests::match_registration_skips_uninstalling` | T-04 |
-| `R15.5.3` | `crates/boa_sw_core/src/invariants.rs` | `invariants::tests::detects_worker_in_two_slots`, `invariants::tests::detects_empty_non_uninstalling_registration`, `invariants::tests::detects_running_redundant_worker`, `invariants::tests::detects_duplicate_or_dangling_ids`, `invariants::tests::detects_registration_index_mismatch`, `invariants::tests::detects_worker_registration_mismatch` | T-04 |
+| `R15.5.3` | `crates/boa_sw_core/src/invariants.rs` | `invariants::tests::detects_worker_in_two_slots`, `invariants::tests::detects_empty_non_uninstalling_registration`, `invariants::tests::detects_running_redundant_worker`, `invariants::tests::detects_duplicate_or_dangling_ids`, `invariants::tests::detects_registration_index_mismatch`, `invariants::tests::detects_worker_registration_mismatch`, `invariants::tests::detects_slot_worker_registration_mismatch`, `invariants::tests::detects_registration_missing_from_scope_index` | T-04 |
 
 *(every later task appends its rows)*
 

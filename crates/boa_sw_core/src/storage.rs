@@ -324,8 +324,7 @@ mod serde_header_map {
     {
         use serde::ser::SerializeSeq as _;
         let mut seq = serializer.serialize_seq(Some(map.len()))?;
-        for name_value in map {
-            let (name, value) = name_value;
+        for (name, value) in map {
             seq.serialize_element(&(name.as_str(), value.as_bytes()))?;
         }
         seq.end()
@@ -720,54 +719,32 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn serde_http_adapters_round_trip() {
-        use crate::model::serde_token::TokenDeserializer;
+        use crate::model::serde_token::{TokenDeserializer, tokens_of};
 
-        // `serde_http_method`: valid method survives, garbage is rejected.
+        // One adapter table per family: method, header map (multi-value, order kept),
+        // header-name vec, body bytes. Each serializes through the token harness and back.
         let method = Method::POST;
-        let mut serializer = crate::model::serde_token::TokenSerializer::default();
-        serde_http_method::serialize(&method, &mut serializer).unwrap();
-        let back = serde_http_method::deserialize(&mut TokenDeserializer::new(
-            &serializer.tokens_for_test(),
-        ))
-        .unwrap();
+        let tokens = tokens_of(|s| serde_http_method::serialize(&method, s).unwrap());
+        let back = serde_http_method::deserialize(&mut TokenDeserializer::new(&tokens)).unwrap();
         assert_eq!(back, Method::POST);
 
-        // `serde_header_map`: multi-value headers keep order; invalid pairs are rejected.
         let mut map = HeaderMap::new();
-        map.append(
-            http::header::ACCEPT,
-            http::HeaderValue::from_static("text/html"),
-        );
-        map.append(
-            http::header::ACCEPT,
-            http::HeaderValue::from_static("application/json"),
-        );
-        let mut serializer = crate::model::serde_token::TokenSerializer::default();
-        serde_header_map::serialize(&map, &mut serializer).unwrap();
-        let back = serde_header_map::deserialize(&mut TokenDeserializer::new(
-            &serializer.tokens_for_test(),
-        ))
-        .unwrap();
+        for value in ["text/html", "application/json"] {
+            map.append(http::header::ACCEPT, http::HeaderValue::from_static(value));
+        }
+        let tokens = tokens_of(|s| serde_header_map::serialize(&map, s).unwrap());
+        let back = serde_header_map::deserialize(&mut TokenDeserializer::new(&tokens)).unwrap();
         assert_eq!(back.get_all(http::header::ACCEPT).iter().count(), 2);
 
-        // `serde_header_name_vec`: names survive; invalid names are rejected.
         let names = vec![http::header::ACCEPT, http::header::VARY];
-        let mut serializer = crate::model::serde_token::TokenSerializer::default();
-        serde_header_name_vec::serialize(&names, &mut serializer).unwrap();
-        let back = serde_header_name_vec::deserialize(&mut TokenDeserializer::new(
-            &serializer.tokens_for_test(),
-        ))
-        .unwrap();
+        let tokens = tokens_of(|s| serde_header_name_vec::serialize(&names, s).unwrap());
+        let back =
+            serde_header_name_vec::deserialize(&mut TokenDeserializer::new(&tokens)).unwrap();
         assert_eq!(back, names);
 
-        // `serde_bytes_rc_vec`: body bytes survive.
         let body = Rc::new(b"hello".to_vec());
-        let mut serializer = crate::model::serde_token::TokenSerializer::default();
-        serde_bytes_rc_vec::serialize(&body, &mut serializer).unwrap();
-        let back = serde_bytes_rc_vec::deserialize(&mut TokenDeserializer::new(
-            &serializer.tokens_for_test(),
-        ))
-        .unwrap();
+        let tokens = tokens_of(|s| serde_bytes_rc_vec::serialize(&body, s).unwrap());
+        let back = serde_bytes_rc_vec::deserialize(&mut TokenDeserializer::new(&tokens)).unwrap();
         assert_eq!(&*back, &*body);
     }
 
