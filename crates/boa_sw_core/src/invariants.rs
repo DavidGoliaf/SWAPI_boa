@@ -14,12 +14,14 @@ use crate::url_util::serialize_exclude_fragment;
 impl Registry {
     /// Checks every `R15.5.3` rule without mutating the registry.
     ///
-    /// Rules (§6 of work order `T-04`):
+    /// Rules (§6 of work order `T-04`, extended by review fixes):
     /// 1. no worker in two slots; 2. worker-less registration only when `uninstalling`;
     /// 3. no `Running` + `Redundant` worker; 4. `pending_events` never negative (by `u32`
     ///    construction; underflow made impossible through the mutation API);
     /// 5. ids unique, slots reference existing workers; 6. index key agrees with the record;
-    /// 7. every worker points to an existing registration.
+    /// 7. every worker points to an existing registration;
+    /// 8. every slot references a worker whose back-pointer agrees (slot ↔ `registration`);
+    /// 9. every registration record has a scope-index entry.
     ///
     /// # Errors
     /// `Err` with a diagnostic naming the violated rule.
@@ -28,7 +30,9 @@ impl Registry {
         self.check_workerless_implies_uninstalling()?;
         self.check_no_running_redundant()?;
         self.check_slots_reference_existing_workers()?;
+        self.check_slots_agree_with_workers()?;
         self.check_index_keys_agree()?;
+        self.check_every_registration_indexed()?;
         self.check_workers_point_to_registrations()?;
         Ok(())
     }
@@ -96,6 +100,30 @@ impl Registry {
         Ok(())
     }
 
+    /// §6 rule 8: every slotted worker's back-pointer agrees with the slotting registration.
+    ///
+    /// `insert_*`/`replace_*` enforce this on write; the checker re-verifies it so a registry
+    /// built by any other path (restore, backend) cannot silently diverge.
+    fn check_slots_agree_with_workers(&self) -> Result<(), String> {
+        for record in self.registrations_for_invariants() {
+            for slot in [record.installing, record.waiting, record.active]
+                .into_iter()
+                .flatten()
+            {
+                let Some(worker) = self.worker(slot) else {
+                    continue;
+                };
+                if worker.registration != record.id {
+                    return Err(format!(
+                        "registration {} slot holds worker {slot} belonging to registration {}",
+                        record.id, worker.registration
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// §6 rule 6: every scope-index entry points at a record whose id, key and normalized scope
     /// agree with the index key.
     fn check_index_keys_agree(&self) -> Result<(), String> {
@@ -118,6 +146,39 @@ impl Registry {
                 return Err(format!(
                     "registration {id} scope disagrees with its scope index key"
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    /// §6 rule 9: every registration record has a scope-index entry pointing at it.
+    ///
+    /// The forward direction (index → record) is `check_index_keys_agree`; this is the reverse
+    /// (record → index). A record invisible to `get_registration`/`match_registration` but
+    /// visible to `newest_worker` would split the registry's view of itself.
+    fn check_every_registration_indexed(&self) -> Result<(), String> {
+        for record in self.registrations_for_invariants() {
+            let expected = (
+                record.storage_key.clone(),
+                serialize_exclude_fragment(&record.scope),
+            );
+            match self
+                .scope_index_for_invariants()
+                .find(|(key, _)| *key == &expected)
+            {
+                Some((_, indexed)) if *indexed == record.id => {}
+                Some((_, indexed)) => {
+                    return Err(format!(
+                        "registration {} scope index points at registration {indexed}",
+                        record.id
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "registration {} has no scope index entry",
+                        record.id
+                    ));
+                }
             }
         }
         Ok(())
@@ -190,13 +251,13 @@ mod tests {
                 "https://example.com/",
             ))
             .unwrap();
-        registry.insert_worker(worker(10, 1)).unwrap();
+        registry.inject_for_test(None, Some(worker(10, 1)), None);
         let mut record = registry
             .registration(RegistrationId::from_raw(1))
             .unwrap()
             .clone();
         record.installing = Some(crate::ids::WorkerId::from_raw(10));
-        registry.replace_registration(record).unwrap();
+        registry.inject_for_test(Some(record), None, None);
         registry
     }
 
@@ -279,6 +340,86 @@ mod tests {
         registry.inject_for_test(Some(broken), None, None);
         let err = registry.check_invariants().unwrap_err();
         assert!(err.contains("missing worker"), "{err}");
+    }
+
+    #[test]
+    fn detects_slot_worker_registration_mismatch() {
+        // Slot in R1 holds a worker whose back-pointer says R2 (`inject_for_test` bypasses the
+        // `insert_*`/`replace_*` validation that now rejects this on write). Both registrations
+        // are `uninstalling` so rule 2 does not fire first; the back-pointer mismatch is the
+        // reported violation.
+        let mut registry = Registry::new();
+        let mut r1 = registration(1, "https://example.com", "https://example.com/");
+        r1.uninstalling = true;
+        let mut r2 = registration(2, "https://example.com", "https://example.com/app/");
+        r2.uninstalling = true;
+        registry.inject_for_test(
+            Some(r1),
+            Some(worker(10, 2)),
+            Some((
+                (
+                    crate::key::StorageKey::from_raw("https://example.com"),
+                    String::from("https://example.com/"),
+                ),
+                RegistrationId::from_raw(1),
+            )),
+        );
+        registry.inject_for_test(
+            Some(r2),
+            None,
+            Some((
+                (
+                    crate::key::StorageKey::from_raw("https://example.com"),
+                    String::from("https://example.com/app/"),
+                ),
+                RegistrationId::from_raw(2),
+            )),
+        );
+        let mut broken = registry
+            .registration(RegistrationId::from_raw(1))
+            .unwrap()
+            .clone();
+        broken.installing = Some(crate::ids::WorkerId::from_raw(10));
+        registry.inject_for_test(Some(broken), None, None);
+        let err = registry.check_invariants().unwrap_err();
+        assert!(err.contains("belonging to registration"), "{err}");
+    }
+
+    #[test]
+    fn detects_registration_missing_from_scope_index() {
+        // Record present in `registrations` but with no scope-index entry: invisible to
+        // `get_registration`/`match_registration` yet visible to `newest_worker`. R2 is
+        // `uninstalling` so rule 2 does not fire first; the missing index entry is the
+        // reported violation.
+        let mut registry = valid_registry();
+        let mut ghost = registration(2, "https://example.com", "https://example.com/app/");
+        ghost.uninstalling = true;
+        registry.inject_for_test(Some(ghost), None, None);
+        let err = registry.check_invariants().unwrap_err();
+        assert!(err.contains("has no scope index entry"), "{err}");
+    }
+
+    #[test]
+    fn detects_scope_index_pointing_at_wrong_registration() {
+        // Two records share one scope string in the index (only one can own it): the loser is
+        // reported as mis-indexed.
+        let mut registry = valid_registry();
+        registry.inject_for_test(
+            None,
+            None,
+            Some((
+                (
+                    crate::key::StorageKey::from_raw("https://example.com"),
+                    String::from("https://example.com/app/"),
+                ),
+                RegistrationId::from_raw(1),
+            )),
+        );
+        let err = registry.check_invariants().unwrap_err();
+        assert!(
+            err.contains("scope disagrees with its scope index key"),
+            "{err}"
+        );
     }
 
     #[test]

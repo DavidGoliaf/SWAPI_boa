@@ -17,21 +17,28 @@
   local `serde_*` adapter modules so the `serde` feature stays dependency-free (no new
   dependencies, no manifest change). Test-only `serde_token` harness (token serializer +
   deserializer) proves every `Serialize`/`Deserialize` impl round-trips without a format crate.
-- `crates/boa_sw_core/src/registry.rs` (new, ~680 lines incl. tests) — private `Registry`
+- `crates/boa_sw_core/src/registry.rs` (new, ~870 lines incl. tests) — private `Registry`
   (`IndexMap<(StorageKey, String), RegistrationId>` + two `HashMap`s, `pub(crate)` fields, no
   public mutable state) with the exact §4.2 method surface (`new`, `insert_*`, `replace_*`,
   `remove_*`, `registration`, `worker`, `get_registration`, `match_registration`,
   `newest_worker`, `registrations_for_origin`). Scope insertion normalizes fragments (`R6.1.3`);
   `match_registration` passes stored scopes directly to `url_util::scope_matches` (Q-02),
   skips `uninstalling`, picks the longest serialized scope; no second parser, no Q-03 change.
+  Post-review fixes: slots must reference workers whose back-pointer agrees (bidirectional
+  slot ↔ `registration` validation in `insert_registration`/`replace_registration`);
+  `replace_worker` rejects moving a slotted worker to another registration (clear the slot
+  first); `remove_registration` rejects residual workers pointing at the registration
+  (remove workers first, then the registration).
 - `crates/boa_sw_core/src/storage.rs` (new, ~740 lines incl. tests) — `SwStorage` with the
   exact §4.2.4 signatures plus all DTOs per §5.2–§5.3 (`PersistedRegistration`,
   `StorageBatch`/`StorageOp`, `CacheName`, `CacheEntryId`, `CacheRequestKey`, `CacheResponse`/
   `CacheResponseKind`, `CacheEntry`, `CacheQuery`, `CacheOperation`, `CacheBatchReport`).
   `CacheName`/`CacheEntryId` are `#[serde(transparent)]`. No backend, no cache algorithm.
-- `crates/boa_sw_core/src/invariants.rs` (new, ~360 lines incl. tests) —
-  `Registry::check_invariants` covering all seven §6 rules, non-mutating, total, with
-  `inject_for_test` (test-only) for broken-registry construction.
+- `crates/boa_sw_core/src/invariants.rs` (new, ~490 lines incl. tests) —
+  `Registry::check_invariants` covering §6 rules 1–7 plus two review-added rules: rule 8
+  (slot ↔ worker back-pointer agreement) and rule 9 (every registration has a scope-index
+  entry), non-mutating, total, with `inject_for_test` (test-only) for broken-registry
+  construction.
 - `crates/boa_sw_core/src/ids.rs`, `src/key.rs` — added feature-gated `serde` derives to the
   existing id/key newtypes (required by record DTOs; no behaviour change).
 - `crates/boa_sw_core/src/lib.rs` — registers `model`, `registry`, `storage`, `invariants`;
@@ -52,12 +59,12 @@ new modules are untracked files totalling ~2900 lines with tests (~1500 without 
 | 1 | Scope and budget | `git diff --stat`, `git diff --name-only`, `git status --short` | tracked: `ids.rs` (+2), `key.rs` (+1), `lib.rs` (+14), `public_api.rs` (+33); untracked: `model.rs`, `registry.rs`, `storage.rs`, `invariants.rs`. No manifest/CI/other-crate changes |
 | 2 | Model API | `cargo build -p boa_sw_core --features serde,test-util`, `cargo build -p boa_sw_core --no-default-features` | both `Finished`; exact §3 field names/types; `Clone`/`Debug` (+`PartialEq` for test equality); serde derives only with the feature |
 | 3 | Registry encapsulation | `cargo test -p boa_sw_core --all-features t04_exports_are_reachable` + inspection | pass; fields are `pub(crate)`, all mutation through methods |
-| 4 | Registry behavior | `cargo test -p boa_sw_core --all-features registry::` | 9 tests pass: longest-prefix, key isolation, uninstalling skip, newest-worker precedence, insertion order, replace/index stability, insert rejection, remove cleanup, fragment normalization |
+| 4 | Registry behavior | `cargo test -p boa_sw_core --all-features registry::` | 12 tests pass: longest-prefix, key isolation, uninstalling skip, newest-worker precedence, insertion order, replace/index stability, insert rejection, cross-registration slot rejection, slotted-worker move rejection, residual-worker removal rejection, remove cleanup, fragment normalization |
 | 5 | Storage API | `cargo test -p boa_sw_core --all-features storage::` | 5 tests pass incl. `trait_signature_smoke` (every §5.1 method compiled and called); no backend/algorithm code present |
-| 6 | Invariant coverage | `cargo test -p boa_sw_core --all-features invariants::` | 9 tests pass; every §6 rule has a dedicated failing case + valid-registry success; `check_invariants` never panics (returns `Result`) |
-| 7 | Serde feature | `cargo test -p boa_sw_core --features serde,test-util` | 67 passed, 0 failed (incl. `serde_round_trip_records`, `serde_round_trip_storage_types`, token-harness tests) |
+| 6 | Invariant coverage | `cargo test -p boa_sw_core --all-features invariants::` | 12 tests pass; every §6 rule (incl. review-added rules 8–9) has a dedicated failing case + valid-registry success; `check_invariants` never panics (returns `Result`) |
+| 7 | Serde feature | `cargo test -p boa_sw_core --features serde,test-util` | 73 passed, 0 failed (incl. `serde_round_trip_records`, `serde_round_trip_storage_types`, token-harness tests) |
 | 8 | Feature matrix | `cargo build -p boa_sw_core --all-features` / `--no-default-features` / `--features test-util` | all three `Finished` |
-| 9 | Tests | `cargo test -p boa_sw_core --all-features` | 67 lib + 2 integration passed; `--no-default-features --features test-util`: 58 + 2 passed |
+| 9 | Tests | `cargo test -p boa_sw_core --all-features` | 73 lib + 2 integration passed; `--no-default-features --features test-util`: 64 + 2 passed |
 | 10 | Coverage | `cargo llvm-cov -p boa_sw_core --all-features --summary-only` | `model+registry+storage`: regions 97.02 %, functions 100 %, lines 98.19 % — above the 92 % gate (see §3). Whole-crate 92.54 % regions / 94.19 % lines |
 | 11 | Wasm | `cargo build -p boa_sw_core --target wasm32-unknown-unknown --no-default-features` | `Finished` |
 | 12 | Engine-free core | `cargo tree -p boa_sw_core --all-features --edges normal,build,dev --prefix none` filtered for `^boa_(engine\|gc\|runtime\|wintertc\|macros) ` | no output |
@@ -90,7 +97,10 @@ Lookups (`registry::tests::`): `get_registration_isolated_by_key`,
 `match_registration_longest_prefix_wins`, `match_registration_skips_uninstalling`,
 `newest_worker_precedence`, `registrations_preserve_insertion_order`,
 `replace_methods_preserve_indexes`, `insert_rejects_duplicates_and_dangling_refs`,
-`remove_cleans_all_indexes`, `scope_with_fragment_is_normalized_on_insert`.
+`insert_and_replace_reject_cross_registration_slots`,
+`replace_worker_rejects_moving_slotted_worker`,
+`remove_registration_rejects_residual_workers`, `remove_cleans_all_indexes`,
+`scope_with_fragment_is_normalized_on_insert`.
 
 Invariants (`invariants::tests::`, rule → test):
 
@@ -101,21 +111,33 @@ Invariants (`invariants::tests::`, rule → test):
 | 3. no Running + Redundant | `detects_running_redundant_worker` |
 | 4. `pending_events` never negative | `pending_events_cannot_underflow_by_construction` (`u32` + saturating backstop) |
 | 5. ids unique, slots reference existing workers | `detects_duplicate_or_dangling_ids` |
-| 6. index key agrees with record | `detects_registration_index_mismatch`, `detects_storage_key_mismatch_in_index`, `detects_dangling_scope_index_entry` |
+| 6. index key agrees with record | `detects_registration_index_mismatch`, `detects_storage_key_mismatch_in_index`, `detects_dangling_scope_index_entry`, `detects_scope_index_pointing_at_wrong_registration` |
 | 7. worker points to existing registration | `detects_worker_registration_mismatch` |
+| 8. slot ↔ worker back-pointer agreement (review-added) | `detects_slot_worker_registration_mismatch` |
+| 9. every registration has a scope-index entry (review-added) | `detects_registration_missing_from_scope_index` |
 | valid registry | `valid_registry_passes` |
 
 ## 4. Deviations / questions
 
-None from the work order's contracts. No `docs/QUESTIONS.md` entry was needed: `EventType`'s
-closed 8-variant set, all DTO layouts, and the `Registry` method surface came verbatim from the
-finalized work order; Q-02/Q-03 consequences (§3.4) were applied mechanically.
+No work-order deviations: `EventType`'s closed 8-variant set, all DTO layouts, and the
+`Registry` method surface came verbatim from the finalized work order; Q-02/Q-03 consequences
+(§3.4) were applied mechanically. No new `docs/QUESTIONS.md` entry was needed.
 
-One deliberate addition beyond the letter of §7 (not a deviation — strictly more coverage):
-`model::tests::serde_token_*` harness tests and `storage::tests::serde_http_adapters_round_trip`
-exist because the required `serde_round_trip_*` tests need a `serde` backend and no format crate
-may be added (§1.7). The harness is `#[cfg(all(test, feature = "serde"))]` and ships zero
-production code.
+Post-implementation retrospective review (same session) found and fixed three integrity gaps
+beyond the work order's letter, all within T-04 scope (no API widening, no new files):
+
+1. **Cross-registration slots.** `insert_registration`/`replace_registration` accepted a slot
+   referencing a worker whose `registration` pointed elsewhere; `replace_worker` allowed
+   moving a slotted worker. Now: bidirectional validation on write + `slot_of` guard in
+   `replace_worker` (clear the slot first, then move).
+2. **Orphaned workers on registration removal.** `remove_registration` allowed deletion while
+   non-slotted workers still pointed at the registration. Now: `Err` on residual workers
+   (remove workers first, then the registration) — the order T-05's Clear-Registration flow
+   must follow (§7 note 4).
+3. **Checker blind spots.** Added §6 rules 8 (slot ↔ back-pointer agreement) and 9 (every
+   record has a scope-index entry, both directions). The work-order §6 list (rules 1–7,
+   mirroring `R15.5.3`) is a subset; rules 8–9 are strict additions, documented in
+   `invariants.rs` and mapped in §3 above.
 
 ## 5. Decisions
 
@@ -149,8 +171,9 @@ All mirrored into `docs/traceability.md`.
    rather than adding field-level setters.
 3. `StorageBatch { ops }` + `SwStorage::apply(key, batch)` is the only persistence path; T-05
    emits batches, backends (T-08/T-22) apply them.
-4. `remove_registration` refuses occupied slots and `remove_worker` refuses referenced workers:
-   T-05's Clear-Registration flow must clear slots (via `replace_*`) before removing.
+4. `remove_registration` refuses occupied slots **and** residual workers pointing at the
+   registration: T-05's Clear-Registration flow must clear slots (via `replace_*`), remove
+   workers, then remove the registration — in that order.
 5. `pending_events: u32` with saturating backstop: T-05 mutation helpers must use
    `saturating_add`/`saturating_sub` to keep §6 rule 4 structural.
 6. Branch note: this work was done on `t04-spike-serde-token`; rebase onto `task/t-04`

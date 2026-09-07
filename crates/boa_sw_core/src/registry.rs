@@ -45,7 +45,9 @@ impl Registry {
     /// Inserts a registration. Strips a fragment from the stored scope before indexing (`R6.1.3`).
     ///
     /// # Errors
-    /// `Err` on a duplicate registration id or a duplicate `(storage key, scope)` index key.
+    /// `Err` on a duplicate registration id, a duplicate `(storage key, scope)` index key, a
+    /// slot referencing an unknown worker, or a slot referencing a worker that belongs to a
+    /// different registration.
     pub fn insert_registration(&mut self, mut record: RegistrationRecord) -> Result<(), String> {
         if self.registrations.contains_key(&record.id) {
             return Err(format!("duplicate registration id {}", record.id));
@@ -58,14 +60,20 @@ impl Registry {
                 record.scope.as_str()
             ));
         }
-        // §6 rule 5: slots must reference existing workers.
+        // §6 rules 5/8: slots must reference existing workers that belong to this registration.
         for slot in [record.installing, record.waiting, record.active]
             .into_iter()
             .flatten()
         {
-            if !self.workers.contains_key(&slot) {
+            let Some(worker) = self.workers.get(&slot) else {
                 return Err(format!(
                     "registration slot references unknown worker {slot}"
+                ));
+            };
+            if worker.registration != record.id {
+                return Err(format!(
+                    "registration {} slot references worker {slot} belonging to registration {}",
+                    record.id, worker.registration
                 ));
             }
         }
@@ -75,6 +83,11 @@ impl Registry {
     }
 
     /// Inserts a worker record.
+    ///
+    /// A worker may be inserted before any registration references it in a slot (the normal
+    /// `T-05` order is: insert registration, insert worker, then set the slot via
+    /// `replace_registration`). Inserting a registration that *already* names slots is also
+    /// allowed when the referenced workers exist and belong to it.
     ///
     /// # Errors
     /// `Err` on a duplicate worker id or when the referenced registration does not exist.
@@ -96,10 +109,12 @@ impl Registry {
     ///
     /// The replacement must keep the same `id`, `storage_key` and normalized `scope` (scope
     /// changes belong to unregister + register, not to replacement). Slots must reference
-    /// existing workers. The replacement is atomic: on `Err` the stored record is unchanged.
+    /// existing workers that belong to this registration. The replacement is atomic: on `Err`
+    /// the stored record is unchanged.
     ///
     /// # Errors
-    /// `Err` when the id is unknown, the key/scope changed, or a slot dangles.
+    /// `Err` when the id is unknown, the key/scope changed, a slot dangles, or a slot
+    /// references a worker belonging to a different registration.
     pub fn replace_registration(&mut self, mut record: RegistrationRecord) -> Result<(), String> {
         let stored = self
             .registrations
@@ -119,9 +134,15 @@ impl Registry {
             .into_iter()
             .flatten()
         {
-            if !self.workers.contains_key(&slot) {
+            let Some(worker) = self.workers.get(&slot) else {
                 return Err(format!(
                     "registration slot references unknown worker {slot}"
+                ));
+            };
+            if worker.registration != record.id {
+                return Err(format!(
+                    "registration {} slot references worker {slot} belonging to registration {}",
+                    record.id, worker.registration
                 ));
             }
         }
@@ -131,30 +152,46 @@ impl Registry {
 
     /// Replaces a worker record, preserving id.
     ///
-    /// The replacement must keep the same `id` and reference an existing registration. Atomic:
-    /// on `Err` the stored record is unchanged.
+    /// The replacement must keep the same `id` and reference an existing registration.
+    /// Changing `registration` while the worker occupies a slot is rejected: it would leave
+    /// the old registration pointing at a worker that no longer belongs to it. Clear the slot
+    /// first (via `replace_registration`), then move the worker. Atomic: on `Err` the stored
+    /// record is unchanged.
     ///
     /// # Errors
-    /// `Err` when the id is unknown or the registration reference dangles.
+    /// `Err` when the id is unknown, the registration reference dangles, or the worker is
+    /// still slotted while its `registration` changes.
     pub fn replace_worker(&mut self, record: WorkerRecord) -> Result<(), String> {
-        if !self.workers.contains_key(&record.id) {
+        let Some(stored) = self.workers.get(&record.id) else {
             return Err(format!("unknown worker id {}", record.id));
-        }
+        };
+        let stored_registration = stored.registration;
         if !self.registrations.contains_key(&record.registration) {
             return Err(format!(
                 "worker {} references unknown registration {}",
                 record.id, record.registration
             ));
         }
+        if stored_registration != record.registration && self.slot_of(record.id).is_some() {
+            return Err(format!(
+                "cannot move slotted worker {} from registration {} to {}",
+                record.id, stored_registration, record.registration
+            ));
+        }
         self.workers.insert(record.id, record);
         Ok(())
     }
 
-    /// Removes a registration. Fails while any worker slot is still occupied; on success the
-    /// scope index entry is removed as well. Missing ids return `Ok(None)`.
+    /// Removes a registration. Fails while any worker slot is still occupied or any worker
+    /// record still points at this registration; on success the scope index entry is removed
+    /// as well. Missing ids return `Ok(None)`.
+    ///
+    /// The caller must remove (or move, once `T-05` defines the semantics) residual workers
+    /// first: deleting the registration while orphaned workers remain would leave records
+    /// pointing at a missing registration.
     ///
     /// # Errors
-    /// `Err` when a worker slot is still occupied.
+    /// `Err` when a worker slot is still occupied or a worker still references the registration.
     pub fn remove_registration(
         &mut self,
         id: RegistrationId,
@@ -165,6 +202,12 @@ impl Registry {
         if record.installing.is_some() || record.waiting.is_some() || record.active.is_some() {
             return Err(format!(
                 "cannot remove registration {id} with occupied worker slots"
+            ));
+        }
+        if let Some(orphan) = self.workers.values().find(|w| w.registration == id) {
+            return Err(format!(
+                "cannot remove registration {id} with residual worker {}",
+                orphan.id
             ));
         }
         // Invariant: index key exists exactly when the record does (checked by `check_invariants`).
@@ -193,6 +236,22 @@ impl Registry {
             }
         }
         Ok(self.workers.remove(&id))
+    }
+
+    /// Finds the registration whose slot currently holds `worker`, if any.
+    ///
+    /// A worker id occurs in at most one slot (§6 rule 1); the first match is the only match.
+    fn slot_of(&self, worker: WorkerId) -> Option<RegistrationId> {
+        self.registrations.values().find_map(|record| {
+            if record.installing == Some(worker)
+                || record.waiting == Some(worker)
+                || record.active == Some(worker)
+            {
+                Some(record.id)
+            } else {
+                None
+            }
+        })
     }
 
     /// Returns the registration record for `id`, if present.
@@ -578,6 +637,170 @@ mod tests {
         // Duplicate worker id.
         registry.insert_worker(worker(10, 1)).unwrap();
         assert!(registry.insert_worker(worker(10, 1)).is_err());
+    }
+
+    #[test]
+    fn insert_and_replace_reject_cross_registration_slots() {
+        let mut registry = Registry::new();
+        registry
+            .insert_registration(registration(
+                1,
+                "https://example.com",
+                "https://example.com/",
+            ))
+            .unwrap();
+        registry
+            .insert_registration(registration(
+                2,
+                "https://example.com",
+                "https://example.com/app/",
+            ))
+            .unwrap();
+        registry.insert_worker(worker(10, 2)).unwrap();
+
+        // A slot in R1 pointing at a worker of R2 is rejected on both paths.
+        let mut cross = registration(1, "https://example.com", "https://example.com/");
+        cross.installing = Some(WorkerId::from_raw(10));
+        assert!(registry.replace_registration(cross).is_err());
+
+        let mut fresh = registration(3, "https://example.com", "https://example.com/other/");
+        fresh.waiting = Some(WorkerId::from_raw(10));
+        assert!(registry.insert_registration(fresh).is_err());
+
+        // Foreign slots are rejected on both paths; R1/R2 still have no workers, so the
+        // worker-less rule does not apply (both are fresh registrations)... instead assert
+        // directly: slots unchanged, workers untouched, and the registry otherwise valid
+        // apart from the two fresh empty registrations.
+        assert_eq!(registry.newest_worker(RegistrationId::from_raw(1)), None);
+        assert_eq!(
+            registry
+                .registration(RegistrationId::from_raw(1))
+                .unwrap()
+                .installing,
+            None
+        );
+        // Two fresh empty non-uninstalling registrations violate rule 2 by themselves; clear
+        // that orthogonal noise before asserting the cross-slot rejection left no trace.
+        for id in [1, 2] {
+            let mut record = registry
+                .registration(RegistrationId::from_raw(id))
+                .unwrap()
+                .clone();
+            record.uninstalling = true;
+            registry.replace_registration(record).unwrap();
+        }
+        assert!(registry.check_invariants().is_ok());
+    }
+
+    #[test]
+    fn replace_worker_rejects_moving_slotted_worker() {
+        let mut registry = Registry::new();
+        registry
+            .insert_registration(registration(
+                1,
+                "https://example.com",
+                "https://example.com/",
+            ))
+            .unwrap();
+        registry
+            .insert_registration(registration(
+                2,
+                "https://example.com",
+                "https://example.com/app/",
+            ))
+            .unwrap();
+        registry.insert_worker(worker(10, 1)).unwrap();
+        let mut record = registry
+            .registration(RegistrationId::from_raw(1))
+            .unwrap()
+            .clone();
+        record.active = Some(WorkerId::from_raw(10));
+        registry.replace_registration(record).unwrap();
+
+        // Moving a slotted worker to another registration is rejected; the record is unchanged.
+        let mut moved = worker(10, 1);
+        moved.registration = RegistrationId::from_raw(2);
+        assert!(registry.replace_worker(moved).is_err());
+        assert_eq!(
+            registry
+                .worker(WorkerId::from_raw(10))
+                .unwrap()
+                .registration,
+            RegistrationId::from_raw(1)
+        );
+
+        // After clearing the slot the same move succeeds.
+        let mut record = registry
+            .registration(RegistrationId::from_raw(1))
+            .unwrap()
+            .clone();
+        record.active = None;
+        registry.replace_registration(record).unwrap();
+        let mut moved = worker(10, 1);
+        moved.registration = RegistrationId::from_raw(2);
+        registry.replace_worker(moved).unwrap();
+        assert_eq!(
+            registry
+                .worker(WorkerId::from_raw(10))
+                .unwrap()
+                .registration,
+            RegistrationId::from_raw(2)
+        );
+        // W10 now belongs to R2 without occupying a slot there: legal. Both registrations
+        // are empty, so mark R1 uninstalling before asserting: an empty non-uninstalling
+        // registration already violates rule 2 on its own.
+        let mut record = registry
+            .registration(RegistrationId::from_raw(1))
+            .unwrap()
+            .clone();
+        record.uninstalling = true;
+        registry.replace_registration(record).unwrap();
+        let mut record = registry
+            .registration(RegistrationId::from_raw(2))
+            .unwrap()
+            .clone();
+        record.uninstalling = true;
+        registry.replace_registration(record).unwrap();
+        assert!(registry.check_invariants().is_ok());
+    }
+
+    #[test]
+    fn remove_registration_rejects_residual_workers() {
+        let mut registry = Registry::new();
+        registry
+            .insert_registration(registration(
+                1,
+                "https://example.com",
+                "https://example.com/",
+            ))
+            .unwrap();
+        registry.insert_worker(worker(10, 1)).unwrap();
+
+        // No slot occupied, but the worker record still points at R1: removal is rejected.
+        assert!(
+            registry
+                .remove_registration(RegistrationId::from_raw(1))
+                .is_err()
+        );
+        // The registry is otherwise consistent (a non-slotted worker is legal); the caller
+        // must remove the worker first, then the registration. Mark R1 uninstalling first:
+        // an empty non-uninstalling registration already violates rule 2 on its own, which
+        // would mask the residual-worker assertion below.
+        let mut record = registry
+            .registration(RegistrationId::from_raw(1))
+            .unwrap()
+            .clone();
+        record.uninstalling = true;
+        registry.replace_registration(record).unwrap();
+        assert!(registry.check_invariants().is_ok());
+        registry.remove_worker(WorkerId::from_raw(10)).unwrap();
+        assert!(
+            registry
+                .remove_registration(RegistrationId::from_raw(1))
+                .unwrap()
+                .is_some()
+        );
+        assert!(registry.check_invariants().is_ok());
     }
 
     #[test]
