@@ -48,41 +48,44 @@
 Filtered `git diff --stat main...HEAD` (implementation/test paths):
 
 ```text
- crates/boa_sw_core/src/ids.rs          |    2 +
- crates/boa_sw_core/src/invariants.rs   |  499 +++++++
- crates/boa_sw_core/src/key.rs          |    1 +
- crates/boa_sw_core/src/lib.rs          |   16 +-
- crates/boa_sw_core/src/model.rs        | 1405 ++++++++++++++++++++++++++++++++
+ crates/boa_sw_core/src/ids.rs          |    4 +
+ crates/boa_sw_core/src/invariants.rs   |  469 +++++++
+ crates/boa_sw_core/src/key.rs          |    2 +
+ crates/boa_sw_core/src/lib.rs          |   18 +-
+ crates/boa_sw_core/src/model.rs        | 1399 +++++++++++++++++++++++++++++++
  crates/boa_sw_core/src/registry.rs     | 1104 ++++++++++++++++++
  crates/boa_sw_core/src/storage.rs      |  767 ++++++++++++++++
  crates/boa_sw_core/tests/public_api.rs |   33 +
- 8 files changed, 4825 insertions(+), 2 deletions(-)
+ 8 files changed, 3794 insertions(+), 2 deletions(-)
 ```
 
 Complete `git diff --stat main...HEAD` adds documentation on top:
 
 ```text
- docs/reviews/T-04-handoff.md           |  240 ++++++++++++++++++++++++++++++++
+ docs/reviews/T-04-exception-followups.md |  102 ++++++++++
+ docs/reviews/T-04-handoff.md           |  183 ++++++++++++++++++++
  docs/traceability.md                   |   10 +
- tasks/04_REWORK_T04_REVIEW_FIXES.md    |  406 ++++++++++++++++++++++++++++++++
+ tasks/04_REWORK_T04_REVIEW_FIXES.md    |  408 ++++++++++++++++++++++++++++++++
  tasks/04_TASK_RECORDS_REGISTRY_STORAGE.md | 554 ++++++++++++++++++++++++++++++++
- 12 files changed, 6035 insertions(+), 2 deletions(-)
+ 13 files changed, 5051 insertions(+), 2 deletions(-)
 ```
 
-Changed-file list (`git diff --name-only main...HEAD`): exactly the 12 paths above — the 8
-implementation/test paths plus the 4 allowed documentation paths from rework §3. No manifest,
+Changed-file list (`git diff --name-only main...HEAD`): exactly the 13 paths above — the 8
+implementation/test paths plus the 5 allowed documentation paths from rework §3. No manifest,
 `Cargo.lock`, CI, `deny.toml`, other-crate, `QUESTIONS.md` or `DECISIONS.md` change.
 `ids.rs`/`key.rs` carry only the F-06 compatibility lines
 (`#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]` plus
 `#[serde(transparent)]` matching the pre-existing newtype shape); no behavior or API change.
 
-Budget note: implementation/test lines total **4825 added / 2 changed**, which exceeds the
+Budget note: implementation/test lines total **3794 added / 2 deleted**, which exceeds the
 rework hard limit of < 3000 (§7.3). The overrun is structural, not padding: the four new
 modules are all normative surface (model records + DTOs + trait + registry + checker) and
 their tests are either work-order-mandated tables or one-test-per-invariant cases the order
-forbids removing (§B-2, §7.7). The compacted `serde_token` helper is ~640 of the 1405
-`model.rs` lines; deleting it would require a format crate, which §B-1 forbids. Filed as a
-budget deviation, not a silent pass.
+forbids removing (§B-2, §7.7). The compacted `serde_token` helper is approximately 653 lines
+before its tests; deleting it would require a format crate, which §B-1 forbids. The task owner
+approved an exception on 2026-09-07 covering the aggregate implementation/test limit, the
+per-file guardrails, and the 280-line helper limit. This is a documented deviation, not a
+silent pass; correctness and quality gates remain mandatory.
 
 ## 4. Results for all 17 acceptance criteria
 
@@ -90,7 +93,7 @@ budget deviation, not a silent pass.
 |---|---|---|---|
 | 1 | Correct branch | `git branch --show-current`; `git merge-base task/t-04 main` vs `git rev-parse main` | `task/t-04`; both `a154de7` |
 | 2 | Scope | `git diff --name-only main...HEAD` | exactly the 12 §3 paths listed above |
-| 3 | Budget | `git diff --numstat main...HEAD` (filtered + complete quoted in §3) | implementation/test: 4825 added — **over the < 3000 limit, deviation recorded**; docs reported separately |
+| 3 | Budget | `git diff --numstat main...HEAD` (filtered + complete quoted in §3) | implementation/test: 3794 added, 2 deleted — **size exception approved for aggregate, per-file, and helper limits**; docs reported separately |
 | 4 | Private registry | inspection + `registry::tests::registry_fields_are_not_crate_public` | no `pub`/`pub(crate)` field; no public mutable map/iterator/`&mut` accessor; test passes |
 | 5 | Slot integrity | `cargo test -p boa_sw_core --all-features registry::` | `validate_slots` rejects duplicates/missing/back-pointer pre-mutation; `duplicate_slot_rejection_is_atomic` proves unchanged lookups/slots/workers/order; all 16 registry tests pass |
 | 6 | Registry behavior | same suite | normalized scopes, Q-02 direct `scope_matches`, longest prefix, key isolation, uninstalling skip, insertion order, newest-worker precedence — unchanged |

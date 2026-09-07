@@ -117,12 +117,14 @@ crates/boa_sw_core/src/key.rs       # serde derives only; compatibility exceptio
 crates/boa_sw_core/tests/public_api.rs
 docs/traceability.md
 docs/reviews/T-04-handoff.md
+docs/reviews/T-04-exception-followups.md
 tasks/04_TASK_RECORDS_REGISTRY_STORAGE.md
 tasks/04_REWORK_T04_REVIEW_FIXES.md
 ```
 
 No other path may change. In particular, do not change manifests, `Cargo.lock`, CI, `deny.toml`,
-other crates, `docs/QUESTIONS.md` or `docs/DECISIONS.md`. Q-02 and Q-03 are already answered.
+other crates, `docs/QUESTIONS.md` or `docs/DECISIONS.md`. The exception-followups file is a
+review-only document recording the approved size exception. Q-02 and Q-03 are already answered.
 
 The `ids.rs` and `key.rs` exception is limited to:
 
