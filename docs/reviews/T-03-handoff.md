@@ -33,7 +33,7 @@ to avoid `vboxsf` shared-folder I/O slowness (same workaround as `T-01`/`T-02`).
 | 7 | Lints | `cargo clippy -p boa_sw_core --all-targets --all-features -- -D warnings` | ✅ clean |
 | 8 | Formatting | `cargo fmt --all --check` | ✅ clean |
 | 9 | No forbidden constructs in library code | `grep -nE '\.unwrap\(\)\|\.expect\(\|panic!\|todo!\|unimplemented!' crates/boa_sw_core/src/url_util.rs` | only inside `#[cfg(test)]` (the `url()` test helper and its callers) |
-| 10 | Module coverage ≥ 95 % | per-function argument (see below); `cargo llvm-cov` not installed (offline environment) | ✅ |
+| 10 | Module coverage ≥ 95 % | `cargo llvm-cov -p boa_sw_core --all-features --summary-only` — `url_util.rs`: 98.42% regions, 99.13% lines, 96.00% functions | ✅ |
 | 11 | `R6.2.2` prefix behaviour pinned | `scope_matches_table` case `("https://example.com/foo", "https://example.com/foobar", true)`, annotated "Intentional prefix behaviour, R6.2.2" | ✅ present |
 | 12 | Traceability updated | `docs/traceability.md` | ✅ rows added for R6.2.1, R6.2.2, R6.2.3, R6.2.5, R6.2.6, R6.4.1 |
 
@@ -59,7 +59,15 @@ Both functions operate on `&str` borrows (`Url::as_str()`, slice indexing); neit
 `std::hint::black_box` (no allocator-counting harness exists in this workspace to assert this
 programmatically — the same limitation `T-02` would have hit for a similar claim).
 
-### Criterion 10 — per-function coverage argument
+### Criterion 10 — measured coverage
+
+`cargo llvm-cov -p boa_sw_core --all-features --summary-only` completed successfully. The measured
+coverage for `url_util.rs` was 98.42% of regions, 99.13% of lines, and 96.00% of functions.
+
+The complete command output also reported 94.95% total region coverage and 96.42% total line
+coverage across `boa_sw_core`; the task criterion is satisfied by the module-specific result above.
+
+The per-function mapping below records which tests exercise each public URL-layer function:
 
 - `parse_with_base` — `parse_with_base_resolves_relative` (relative + absolute input),
   `parse_with_base_rejects_invalid`, plus indirectly via `path_restriction_ok_table`'s relative
