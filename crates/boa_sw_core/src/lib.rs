@@ -3,8 +3,8 @@
 //! Part of the `boa-sw` workspace. The normative specification is
 //! `TZ_boa_sw_ServiceWorkers.md`; the working contract for implementers is `AGENTS.md`.
 //!
-//! **Status:** URL layer (`T-03`): parsing, scope matching, path restriction on top of the
-//! `T-02` foundations (errors, ids, storage key, clock, observer).
+//! **Status:** records, registry and storage traits (`T-04`): model records, registry
+//! lookups, `SwStorage` interface and the invariants checker, on top of the `T-03` URL layer.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -13,8 +13,12 @@
 pub mod clock;
 pub mod error;
 pub mod ids;
+pub mod invariants;
 pub mod key;
+pub mod model;
 pub mod observe;
+pub mod registry;
+pub mod storage;
 pub mod url_util;
 
 pub use clock::Clock;
@@ -24,4 +28,14 @@ pub use error::{
 };
 pub use ids::{CacheId, ClientId, DispatchId, IdAllocator, JobId, RegistrationId, WorkerId};
 pub use key::{StorageKey, is_potentially_trustworthy};
+pub use model::{
+    EventType, RegistrationRecord, RunState, ScriptResource, ScriptResourceMap, UpdateViaCache,
+    WorkerRecord, WorkerState, WorkerType,
+};
 pub use observe::{NullObserver, ObserverEvent, SwObserver, WarningCode};
+pub use registry::Registry;
+pub use storage::{
+    CacheBatchReport, CacheEntry, CacheEntryId, CacheName, CacheOperation, CacheQuery,
+    CacheRequestKey, CacheResponse, CacheResponseKind, PersistedRegistration, StorageBatch,
+    StorageOp, SwStorage,
+};
