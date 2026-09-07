@@ -85,10 +85,22 @@ The per-function mapping below records which tests exercise each public URL-laye
   malformed-`allowed` fallthrough).
 - `is_javascript_mime` — `is_javascript_mime_table` (all 16 accepted essences plus 3 rejected).
 
+## Final Acceptance
+
+**Verdict: ACCEPTED.**
+
+T-03 satisfies all 12 acceptance criteria. The implementation, tests, feature builds, wasm build,
+clippy, formatting, engine-free dependency check, traceability rows and measured coverage were
+verified by review. `url_util.rs` coverage is 98.42% of regions, 99.13% of lines and 96.00% of
+functions. The worktree was clean after the documentation correction commit
+`3f03294` (`Update T-03 coverage evidence`).
+
+The two escalations below are resolved and are no longer blockers for T-04.
+
 ## Deviations
 
 One genuine work-order-vs-TS discrepancy, found in review and fixed on this branch (escalated as
-`docs/QUESTIONS.md / Q-02`, answer pending):
+`docs/QUESTIONS.md / Q-02`, now answered):
 
 - **`scope_matches` fragment handling.** Work order §3.1 excludes the fragment from *both* sides;
   TS `R6.2.2` excludes it from the client URL only. The implementation now follows the work order
@@ -99,7 +111,7 @@ One genuine work-order-vs-TS discrepancy, found in review and fixed on this bran
 
 One interpretive note, not a deviation from anything explicit in the work order (recorded here
 since it affects `path_restriction_ok`'s observable behaviour on malformed input, which the work
-order left implicit; escalated as `docs/QUESTIONS.md / Q-03`):
+order left implicit; escalated as `docs/QUESTIONS.md / Q-03`, now answered):
 
 - **Malformed `Service-Worker-Allowed` value.** `R6.2.3` does not say what happens when the header
   value fails to parse against the script URL. `path_restriction_ok` treats a malformed `allowed`

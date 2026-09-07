@@ -47,7 +47,11 @@ Template (fenced so it renders as a template; count real questions with `grep -c
 - **Recommendation:** option (2) — implemented in `url_util.rs::scope_matches` with a doc comment
   referencing this question; two `scope_matches_table` cases pin the behaviour
   (`scope` with `#frag` matches). No observable difference for `T-04`'s `match_registration`.
-- **Answer:** *(awaiting architect)*
+- **Answer:** **Answered 2026-09-07 (T-03 acceptance).** Option (2) is accepted: `scope_matches`
+  excludes fragments from both the scope and client serialized URLs. This is the work-order
+  contract, is pinned by the direct-call tests, and is behaviorally identical to the TS wording
+  for normalized stored scopes because `R6.1.3` forbids stored scope fragments. Q-02 is closed;
+  T-04 may use `url_util::scope_matches` without additional fragment handling.
 
 ## Q-03 — `path_restriction_ok`: malformed `Service-Worker-Allowed` value
 - **Raised by / task:** reviewer / `T-03`
@@ -63,4 +67,8 @@ Template (fenced so it renders as a template; count real questions with `grep -c
   ("unless `allowed` is `Some(value)` **and** `value` parses ...").
 - **Recommendation:** option (2) — implemented; `path_restriction_ok_table` covers both
   fallthrough outcomes (`Err` when the default check also fails, `Ok` when it passes).
-- **Answer:** *(awaiting architect)*
+- **Answer:** **Answered 2026-09-07 (T-03 acceptance).** Option (2) is accepted: a malformed
+  `Service-Worker-Allowed` value is treated as absent, so the default script-directory restriction
+  is evaluated. The function returns `SwError::PathRestriction` when that restriction fails and
+  `Ok(())` when it already passes; it does not propagate `SwError::InvalidUrl`. This behavior is
+  pinned by both malformed-header table cases. Q-03 is closed and does not block T-04.
